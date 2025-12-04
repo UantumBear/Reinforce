@@ -1,0 +1,16 @@
+*/__pycache__
+*/__pycache__/*
+*.pyc
+
+datasets
+
+# API KEYS
+key
+key/*
+.env
+
+# Model files
+model/embedding/ko-sroberta-multitask/*
+
+# venv
+venv
