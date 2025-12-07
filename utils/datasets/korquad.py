@@ -50,7 +50,31 @@ class KorQuADDataset:
             logger.info(f"Local cache directory: {cache_dir}")
             
             self.dataset = load_dataset(dataset_name, split=split)
-            logger.info(f"KorQuAD dataset loaded successfully. Size: {len(self.dataset)}")
+            logger.info(f"[CHECK] KorQuAD dataset loaded successfully. Size: {len(self.dataset)}")
+
+            #  ---------- 2. 전처리: 민감한 주제 필터링 (Azure Content Filter 방지) ---------- 
+            logger.info("Starting Preprocessing: Filtering sensitive topics...")
+            
+            forbidden_words = ["정치", "선거", "대통령", "시위", "폭력", "살인", "범죄", "전쟁", "사망", "피해", "북한", "미사일", "정치적", "전후민주주의"]
+            
+            def is_safe_content(example):
+                # KorQuAD 데이터 구조에 맞게 필드 추출
+                text_sources = [
+                    example.get('context', ''),
+                    example.get('question', ''),
+                    example.get('title', ''),
+                    ' '.join(example.get('answers', {}).get('text', []))  # answers의 text 배열 결합
+                ]
+                combined_text = " ".join([str(t) for t in text_sources if t])
+                
+                for word in forbidden_words:
+                    if word in combined_text:
+                        return False
+                return True
+
+            # 필터링 적용
+            self.dataset = self.dataset.filter(is_safe_content)
+            logger.info(f"[CHECK] Filtered dataset size: {len(self.dataset)}")
             
             # 데이터셋 메타데이터 정보 로깅
             if hasattr(self.dataset, 'info'):
@@ -70,16 +94,32 @@ class KorQuADDataset:
         Returns:
             list of tuple: [(question, answer, context), ...]
         """
+        if n <= 0:
+            raise ValueError("n must be positive")
+        if n > len(self.dataset):
+            logger.warning(f"Requested {n} samples but dataset has only {len(self.dataset)} items. Using all available.")
+            n = len(self.dataset)
+            
         indices = random.sample(range(len(self.dataset)), n)
         results = []
         
         for idx in indices:
             item = self.dataset[idx]
-            context = item['context']
-            question = item['question']
-            answer = item['answers']['text'][0] # 첫 번째 정답 사용
-            results.append((question, answer, context))
             
+            # KorQuAD 데이터 구조에 맞게 필드 추출
+            try:
+                question = item['question']
+                answer = item['answers']['text'][0] if item['answers']['text'] else ""
+                context = item['context']
+                
+                results.append((str(question), str(answer), str(context)))
+                
+            except Exception as e:
+                logger.warning(f"Error processing sample {idx}: {e}")
+                logger.warning(f"Sample keys: {list(item.keys())}")
+                # 기본값으로 처리
+                results.append(("", "", ""))
+        
         return results
 
     def save_random_samples(self, num_samples: int = 10, output_format: str = "json") -> str:
