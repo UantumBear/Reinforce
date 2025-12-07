@@ -1,7 +1,7 @@
 """
 @경로 : main_logging.py
 @명령어: python main_logging.py
-@설명 : 강화학습 루프를 실행하고 결과를 CSV로 기록하는 메인 스크립트
+@설명 : 강화학습 루프를 실행하고 결과(CSV, Excel, Graph)를 저장하는 메인 스크립트
 """
 
 import os
@@ -9,6 +9,7 @@ import csv
 import time
 from datetime import datetime
 from typing import Dict, Any
+import matplotlib.pyplot as plt # 그래프 그리는 용도
 import pandas as pd 
 
 # 프로젝트 구조에 맞게 임포트
@@ -22,14 +23,12 @@ from utils.log.logging import logger
 Env.setup_environment()
 if not Env.USE_AZURE:
     Env.check_google_api_key()
+elif Env.USE_AZURE:
+    Env.check_azure_api_key()
 
 # ==========================================
 # [설정] CSV 저장 파일명 및 학습 파라미터
 # ==========================================
-# 현재 시간을 YYMMDD-HHMMSS 형식으로 생성
-timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
-CSV_EPISODE = f"rl_training_episode_log_{timestamp}.csv"
-CSV_SAMPLES = f"rl_training_samples_log_{timestamp}.csv"
 NUM_EPISODES = 10
 
 def run_training_loop():
@@ -38,8 +37,18 @@ def run_training_loop():
     env = PromptOptimizationEnv()
     agent = OptimizationAgent(version="MDP-v3")  # 기본 정책 버전
 
+
+    timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
+    dataset_name = getattr(env, "dataset_name", "UnknownDataset") # env에서 데이터셋 이름 가져오기
+    # 파일명에 데이터셋 이름 포함 (예: rl_KorQuADDataset_episode_log_251204...)
+    CSV_EPISODE = f"rl_{dataset_name}_episode_log_{timestamp}.csv"
+    CSV_SAMPLES = f"rl_{dataset_name}_samples_log_{timestamp}.csv"
+
     print("Setting:", "Azure OpenAI" if Env.USE_AZURE else "Google Gemini (Free)")
     print("=" * 60)
+    print(f"[DEBUG] USE_AZURE environment variable: {os.getenv('USE_AZURE')}")
+    print(f"[DEBUG] USE_AZURE parsed value: {Env.USE_AZURE}")
+    print(f"[INFO] 데이터셋: {dataset_name}")
     print(f"[INFO] 프롬프트 최적화 강화학습 시작! (총 {NUM_EPISODES} 에피소드)")
     print(f"[INFO] 로그 파일: {CSV_EPISODE}, {CSV_SAMPLES}")
     print("=" * 60)
@@ -84,6 +93,7 @@ def run_training_loop():
         "reference",    # 모델이 생성해야 했던 모범답안
         "prediction",   # 모델이 생성한 답변
         "score",        # 당시의 점수
+        "context"       # 당시의 문맥 (있다면)
     ]
 
     # utf-8-sig는 엑셀에서 한글 깨짐 방지용
@@ -148,12 +158,10 @@ def run_training_loop():
                         "reference": sample.get("reference", ""),
                         "prediction": sample.get("prediction", ""),
                         "score": sample.get("score", 0.0),
+                        "context": sample.get("context", ""),
                     }
                 )
             sm_file.flush()
-
-            # 콘솔 출력 및 best 갱신, 히스토리 업데이트는 기존 그대로...
-
 
             # (5) 콘솔 출력
             print(f"\n[INFO] Episode {episode}/{NUM_EPISODES}")
@@ -170,7 +178,6 @@ def run_training_loop():
                 print("[INFO] New Best Score!")
 
             # (6) 히스토리 변수 업데이트 (Shift)
-            # 현재(t)가 다음 루프의 t-1이 되고, 이전 t-1은 t-2가 된다.
             prompt_t_minus_2 = prompt_t_minus_1
             reward_t_minus_2 = reward_t_minus_1
 
@@ -179,7 +186,7 @@ def run_training_loop():
 
 
     # ==========================================
-    # [추가] CSV -> 보기 좋은 엑셀로 변환 및 저장
+    # CSV -> 보기 좋은 엑셀로 변환 및 저장
     # ==========================================
     print("\n[INFO] CSV 로그를 엑셀(.xlsx)로 변환 중...")
     
@@ -191,7 +198,6 @@ def run_training_loop():
         df = pd.read_csv(CSV_SAMPLES)
         
         # 2. 엑셀로 저장 (xlsxwriter 엔진 사용)
-        # engine='xlsxwriter'가 없으면 서식 지정이 안 됩니다.
         with pd.ExcelWriter(EXCEL_SAMPLES, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='Samples')
             
@@ -199,17 +205,15 @@ def run_training_loop():
             workbook  = writer.book
             worksheet = writer.sheets['Samples']
             
-            # 4. 열 너비 지정 (컬럼 순서에 맞춰 수정)
-            # A: episode, B: index, C: question, D: action_prompt, E: reference, F: prediction, G: score
+            # 4. 열 너비 지정
+            worksheet.set_column('A:B', 10)  # episode, index
+            worksheet.set_column('C:C', 40)  # question
+            worksheet.set_column('D:D', 50)  # action_prompt
+            worksheet.set_column('E:E', 50)  # reference
+            worksheet.set_column('F:F', 50)  # prediction
+            worksheet.set_column('G:G', 10)  # score
             
-            worksheet.set_column('A:B', 10)  # episode, index (좁게)
-            worksheet.set_column('C:C', 40)  # question (적당히)
-            worksheet.set_column('D:D', 50)  # action_prompt (넓게 - 중요!)
-            worksheet.set_column('E:E', 50)  # reference (넓게)
-            worksheet.set_column('F:F', 50)  # prediction (넓게)
-            worksheet.set_column('G:G', 10)  # score (좁게)
-            
-            # (옵션) 텍스트 줄바꿈 설정 (내용이 너무 길면 줄바꿈)
+            # 텍스트 줄바꿈 설정
             text_wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
             worksheet.set_column('C:C', 50, text_wrap_format)
             worksheet.set_column('D:D', 60, text_wrap_format)
@@ -219,6 +223,41 @@ def run_training_loop():
         
     except Exception as e:
         print(f"[Warning] 엑셀 변환 실패 (pandas/xlsxwriter 설치 필요): {e}")
+
+
+    # ==========================================
+    # [수정] 보고서용 학습 그래프 그리기 & 저장 (하나의 차트에 겹쳐 그리기)
+    # ==========================================
+    print(f"\n[INFO] 학습 결과 그래프 생성 중...")
+    GRAPH_FILE = CSV_EPISODE.replace(".csv", ".png")
+
+    try:
+        # 1. 데이터 로드
+        df = pd.read_csv(CSV_EPISODE)
+
+        # 2. 그래프 그리기 (하나의 차트에 겹쳐서)
+        plt.figure(figsize=(10, 6))
+
+        # (1) 평균 점수 (Blue)
+        plt.plot(df['episode'], df['avg_reward'], marker='o', color='b', label='Avg Reward (Mean)')
+        
+        # (2) 최악 점수 (Red)
+        plt.plot(df['episode'], df['worst_score'], marker='x', color='r', label='Worst Score (Robustness)')
+
+        plt.title(f'Learning Curve: Avg vs Worst ({dataset_name})')
+        plt.xlabel('Episode')
+        plt.ylabel('Score (Cosine Similarity)')
+        plt.ylim(0.0, 1.05) # 점수 범위 고정 (보기 좋게)
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.legend(loc='lower right') # 범례 위치 지정
+
+        # 3. 저장하기
+        plt.tight_layout()
+        plt.savefig(GRAPH_FILE)
+        print(f"[INFO] 그래프 저장 완료! 파일: {os.path.abspath(GRAPH_FILE)}")
+
+    except Exception as e:
+        print(f"[Warning] 그래프 생성 실패 (matplotlib 설치 필요): {e}")
 
     # 5. 최종 결과 출력
     print("\n" + "=" * 60)
