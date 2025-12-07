@@ -5,6 +5,7 @@
 import time
 from typing import Tuple, Dict
 import numpy as np
+import torch # GPU 메모리 확인용
 from sklearn.metrics.pairwise import cosine_similarity
 # from langchain_core.prompts import PromptTemplate
 from langchain_core.prompts import ChatPromptTemplate
@@ -14,6 +15,7 @@ from utils.models.model import ModelFactory # LLM 모델과 임베딩 모델 관
 from utils.datasets.klue_mrc import KlueMrcDataset # 데이터셋 관리
 from utils.datasets.aihub_llm_development_qa import AihubLlmDevelopmentQaDataset
 from utils.datasets.korquad import KorQuADDataset
+from utils.datasets.klue_rag import KlueMrcKoRagDataset # KLUE RAG 데이터셋
 
 
 class PromptOptimizationEnv:
@@ -43,27 +45,48 @@ class PromptOptimizationEnv:
         self.model_factory = ModelFactory()
         # self.dataset = KlueMrcDataset(split="train") # KLUE MRC 데이터셋 로드 (학습용)
         # self.dataset = AihubLlmDevelopmentQaDataset(split="train") # AIHub LLM 개발용 QA 데이터셋 로드 (학습용)
-        self.dataset = KorQuADDataset(split="train") # KorQuAD 데이터셋 로드 (학습용)
+        # self.dataset = KorQuADDataset(split="train") # KorQuAD 데이터셋 로드 (학습용)
+        self.dataset = KlueMrcKoRagDataset(split="train") # KLUE RAG 데이터셋 로드 (학습용)
 
-        self.target_llm = self.model_factory.get_llm(model_type="target") # LLM 모델 (실제, 응답-답변 생성에 쓰이는 테스트 모델)
+        """
+        KorQuAD 데이터셋을 사용한 이유:
+        - 질문에 대한 정답이 단답형으로 명확하게 주어져 있고, 질문-정답 뿐 아니라, 참조할 문서 또한 주어져 있어,
+          RAG 챗봇의 성능 평가에 적합하다고 판단.
+        - AIHub LLM Development QA 데이터셋은 질문-정답 만 존재, 문서 정보가 없으며,
+          응답에 '문서가 없습니다.'와 같은 샘플 응답이 포함되어 있어 부적합.
+        - 하지만, 그렇기에, 프롬프트를 결정하기 쉬울 수 밖에 없다는 판단도 들어서,
+          주관식으로 음답하는 datasets 을 찾아서 테스트 해볼 필요가 있다고 생각한다. 
+
+        앞으로 사용해볼 데이터셋 목록 찾아보기
+        - KoCoQa 
+        """
+
+        self.target_llm = self.model_factory.get_llm(model_type="target") # 재시도 기능 포함
         # self.embedding_model = self.model_factory.get_embedding_model()   # embdding 모델 # 직접 선언한 래퍼클래스 Ko-SRoBERTa multitask 모델
         self.embedding_model = self.model_factory.get_langchain_embedding_model() # langchain 임베딩 모델 (로컬 Ko-SRoBERTa multitask 모델)
+
+        self.dataset_name = self.dataset.__class__.__name__ # 데이터셋 이름 저장 (로깅파일 저장 용)
 
     def step(self, action_prompt: str) -> Tuple[str, float, Dict]:
         """
         환경에서 한 스텝 실행
-        
-        Args:
-            action_prompt (str): 실행할 프롬프트
+        @Param
+            action_prompt (str): 에이전트가 생성한 새로운 프롬프트
             
-        Returns:
+        @Return
             Tuple[str, float, Dict]: 예측값, 보상, 추가 정보
         """
         if not self.use_azure: 
+            # Target LLM 호출 전 대기
             time.sleep(1)  # 무료 버전 rate limit 방지
 
+
         total_reward = 0
-        batch_size = 3 # 데이터셋에서 3개만 랜덤으로 뽑아서 테스트 (Mini-batch)        
+        valid_sample_count = 0 # 정상적으로 채점된 샘플 수
+        # 호출 중 에러가 날 경우, 일단 점수를 0.0으로 처리하고, 다음 샘플로 넘겼는데,
+        # 해당 점수는 평균 산출 시 제외해야 하므로, valid_sample_count 변수를 추가. 
+
+        batch_size = 5 # 데이터셋에서 n개만 랜덤으로 뽑아서 테스트 (Mini-batch)        
         batch_samples = self.dataset.get_random_samples(batch_size)
 
         worst_case = {}
@@ -74,10 +97,16 @@ class PromptOptimizationEnv:
         #  배치 평가 루프
 
         for q, a, c in batch_samples:
-            
-            # Target LLM 프롬프트 구성 변경 (RAG 시뮬레이션)
+            # 이 샘플이 정상적으로 처리되었는지 확인하는 플래그
+            # 초기값은 False(에러 없음)로 시작
+            is_error = False
+
+
+            # 프롬프트를 사용할 질의응답LLM에게 건네줄 프롬프트 구성 (RAG 시뮬레이션)
             # System: Agent가 만든 최적화된 프롬프트 (말투, 형식 지시 등)
             # User: "지문(Context)"을 주고, 이걸 보고 답하라고 지시
+
+
             target_chain_prompt = ChatPromptTemplate.from_messages([
                 ("system", action_prompt),
                 ("user", """
@@ -94,40 +123,67 @@ class PromptOptimizationEnv:
             # 체인 연결
             chain = target_chain_prompt | self.target_llm | StrOutputParser()
             
+            # Target LLM 실행 (답변 생성)
             try:
-                # [수정 5] invoke 할 때 context 변수(c)도 같이 넘겨줌
+                # invoke 할 때 context 변수(c)도 같이 넘겨줌
                 pred = chain.invoke({"question": q, "context": c})
             except Exception as e:
                 print(f"[Error] Target LLM fail: {e}")
-                pred = "Error generating response"
+                pred = "응답 생성 중 오류가 발생했습니다."
+                is_error = True # [2-2 수정 포인트] 에러 발생 시 플래그 표시
 
-            # --- 이 아래는 점수 계산 로직 (기존과 동일) ---
             
+            # 점수 계산 (임베딩 & 코사인 유사도)
+            if torch.cuda.is_available():
+                # 현재 할당된 GPU 메모리 (MB 단위 변환)
+                mem_alloc = torch.cuda.memory_allocated() / 1024 / 1024
+                # print(f"   [GPU Active] Mem: {mem_alloc:.1f}MB used | Device: {self.embedding_model.client.device}") 
+                # LangChain 버전에 따라 client 접근이 다를 수 있으니 안전하게 아래처럼:
+                print(f"   ► [GPU 연산 시작] 현재 GPU 메모리 사용량: {mem_alloc:.1f}MB")
+            else:
+                print("   ► [CPU 연산 시작] GPU가 감지되지 않음")
+
+            # 정답(a)과 예측(pred)을 임베딩
             try:
-                embeddings = self.embedding_model.embed_documents([a, pred])
+                embeddings = self.embedding_model.embed_documents([a, pred]) # 여기서 GPU 사용
                 score = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
             except Exception:
                 score = 0.0
+                is_error = True # [2-2 수정 포인트] 임베딩 에러 시에도 플래그 표시
 
-            total_reward += score
-            last_prediction = pred
+            print(f"   └ [Sample] Score: {score:.4f} | Q: {q[:20]}... | Pred: {pred[:30]}...")
+
+            # 에러가 아닐 때만 마지막 예측값 저장
+            if not is_error:
+                total_reward += score
+                valid_sample_count += 1
+                last_prediction = pred  # 챗봇(Target LLM)이 내놓은 답변 중 하나를 저장 (로깅 csv 용도)
 
             sample_info = {
                 "question": q,
                 "reference": a,
-                "prediction": pred,
+                "prediction": pred, 
                 "score": score,
             }
             batch_details.append(sample_info)
 
-            if score < min_score:
+
+            # 오답 노트(Worst Case) 갱신 로직
+            # 에러가 아니고(not is_error) AND 점수가 낮을 때만 갱신
+            # 이유: 시스템 에러로 0점 나온 걸 Agent에게 보여주면 "프롬프트 탓"이라고 오해함.
+            if not is_error and score < min_score:
                 min_score = score
                 worst_case = sample_info.copy()
                 worst_case["prompt"] = action_prompt 
 
-        avg_reward = total_reward / max(1, len(batch_samples))
+        # 정상적으로 채점된 개수(valid_sample_count)로만 나눔
+        # dataset 의 일부 샘플이, azure 정책에 걸려서 에러가 나는 경우가 많음.
+        if valid_sample_count > 0:
+            avg_reward = total_reward / valid_sample_count
+        else:
+            avg_reward = 0.0 # 전부 다 에러난 경우
 
-        return last_prediction, avg_reward, {"worst_case": worst_case, "batch_details": batch_details}
+        return last_prediction, avg_reward, {"worst_case": worst_case, "batch_details": batch_details} 
         # for q, a in batch_samples:
         #     # Target LLM에게 "너는 이런 역할을 해"라고 지시 주입
         #     # action_prompt(Agent가 만든 것) -> System Role
