@@ -50,7 +50,7 @@ class OptimizationAgent:
 
         self.model_factory = ModelFactory()
         
-        self.optimizer_llm = self.model_factory.get_llm(model_type="optimizer") # 프롬프트를 생성하는 LLM
+        self.optimizer_llm = self.model_factory.get_llm(model_type="optimizer") # 재시도 기능 포함
         self.use_azure = Env.USE_AZURE
         self.version = version
         
@@ -65,9 +65,9 @@ class OptimizationAgent:
         @return
             str: 새로운 프롬프트
         """
-        if not self.use_azure: 
-            # 제미나이는 무료티어에서 분당 요청 수 제한이 있으므로 대기
-            time.sleep(2)
+        # if not self.use_azure:  --> env 에서 처리
+        #     # 제미나이는 무료티어에서 분당 요청 수 제한이 있으므로 대기
+        #     time.sleep(2) # Agent가 새로운 프롬프트를 생성할 때마다 2초 대기
             
         # 체인 = PromptTemplate | LLM | OutputParser
         # 체인 구성: Prompt(설정+피드백) -> LLM(생성) -> String(텍스트추출)
@@ -92,6 +92,7 @@ class OptimizationAgent:
             "worst_reference": worst_case.get("reference", "N/A")[:200],
             "worst_prediction": worst_case.get("prediction", "N/A")[:200],
             "worst_prompt": worst_prompt[:200],
+            "worst_context": worst_case.get("context", "N/A")[:200],
             
             # [Goal] 현재 목표
             "current_question": state.get("question", ""),
@@ -237,21 +238,22 @@ class OptimizationAgent:
 [Reflexion - 과거 시도 및 반성]
 **2단계 전 시스템 프롬프트:**
 "{previous_prompt_t2}"
-→ 챗봇 평균 유사도: {previous_reward_t2:.4f}
+→ 2단계 전 챗봇 평균 유사도: {previous_reward_t2:.4f}
 
 **직전 시스템 프롬프트:**
 "{previous_prompt}"  
-→ 챗봇 평균 유사도: {previous_reward:.4f}
-
+→ 직전 챗봇 평균 유사도: {previous_reward:.4f}
+                 
 **최악의 실패 사례 (Reflexion 대상):**
 - 질문: {worst_question}
+- 문맥(Context): {worst_context}
 - 모범답안: {worst_reference}
 - 챗봇이 실제로 생성한 답변(오답): {worst_prediction}
 - 그때 사용된 시스템 프롬프트: {worst_prompt}
 → [분석 요청] 이 경우의 유사도가 가장 낮았습니다. 챗봇이 왜 모범답안 스타일대로 답변하지 못했는지 원인을 분석하세요.
 
 [최종 액션]
-위의 분석을 바탕으로, 챗봇이 모범답안과 유사한 답변을 생성하도록 유도하는 **새로운 시스템 프롬프트**를 작성하세요.
+위의 분석을 바탕으로, 질의응답 챗봇이 모범답안과 유사한 답변을 생성하도록 유도하는 **새로운 시스템 프롬프트**를 작성하세요.
 (설명 없이 프롬프트 본문만 출력)
 """)
         ])
@@ -260,3 +262,18 @@ class OptimizationAgent:
          
 
         return policy_prompt
+    
+    """
+    @추가설명
+    1)
+    2단계전, 1단계전 정보를 주는 것은 '추세 파악' 용도이다.
+    "짧게 말해." 라고 했을때 점수가 올랐나? 내렸나? 와 같은,
+    프롬프트의 전략이 통했나? 를 파악하기 위한 용도이다.
+
+    2)
+    오답노트의 역할은 '원인 분석' 용도이다.
+    TargetLLM에게는 context도 주어질텐데, context에 A라고 써져있음에도,
+    TartgetLLM은 B 라고 대답했네? 그러면 Context를 어떻게 참고하라고 알려줘야 하나? 와 같은..
+    그런 실패 원인을 분석하라고 도움을 주기 위한 용도이다. 
+    
+    """
