@@ -29,3 +29,7 @@ pip install torch torchvision torchaudio --index-url [https://download.pytorch.o
 
 ## 프로젝트 실행
 (.venv) python main_logging.py
+
+## 디버깅 모드 실행
+.vscode/launch.json 에 python 에 가상환경 패스 추가  
+Ctrl + Shift + P 하고 Python: Select Interpreter 로 가상환경 패스 선택
