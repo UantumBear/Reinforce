@@ -2,7 +2,7 @@
 */__pycache__/*
 *.pyc
 
-datasets
+datasets/samples/*
 
 # API KEYS
 key
@@ -14,3 +14,7 @@ model/embedding/ko-sroberta-multitask/*
 
 # venv
 venv
+.venv
+
+# ignore 
+*/ignore/*
