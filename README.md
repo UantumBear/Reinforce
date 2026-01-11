@@ -1,35 +1,28 @@
-# 프롬프트 최적화 강화학습 (Prompt Optimization RL)
+# Prompt Optimization (프롬프트 최적화)
 
-이 프로젝트는 LLM을 사용하여 RAG 시스템의 프롬프트를 자동으로 최적화하는 강화학습 에이전트입니다.
+이 프로젝트는 LLM을 사용하여 RAG 시스템의 프롬프트를 자동으로 최적화하는 강화학습 에이전트입니다.  
+##### Release Tag v1.0
+State-Action-Reward 강화학습을 모티브로 설계한 프롬프트 최적화 프레임워크,  Google generative ai (gemini) 를 사용하였습니다.  
+
+##### 진행 중
+최근에 나온 다양한 프롬프트 최적화 도구를 사용해, 디벨롭해보고자 합니다.   
+
+---
+
+# Reinforce Project
+
+## Dependencies & Acknowledgments
+
+This project uses code from the following open source projects:
+
+### DSPy
+- **Source**: [Stanford DSPy](https://github.com/stanfordnlp/dspy)  
+- **License**: MIT License  
+- **Usage**: Bootstrap algorithm implementation study (`utils/tools/dspy_ai/study/`)
+- **Copyright**: Copyright (c) 2023 Stanford Future Data Systems
+
+---
 
 ## 환경 설정 가이드 (Installation)
 
-이 프로젝트는 **GPU 가속(NVIDIA CUDA / Apple MPS)**을 자동으로 감지하여 지원합니다.
-GPU가 없어도 CPU 모드로 실행 가능합니다.
-
-### 1. 필수 라이브러리 설치
-### 셋팅 방식 1 ... (최신)
-```powershell
-uv sync
-```
-
-### 셋팅 방식 2 ... (old, 호환 안 될 수 있음. 기록을 위해 작성해 둠)
-```powershell
-# 가상환경 생성
-C:\Users\litl\AppData\Local\Programs\Python\Python312\python.exe -m venv venv
-# 가상환경 활성화
-.\venv\Scripts\activate
-# 라이브러리 설치 
-pip install -r requirements.txt
-# pytorch 설치 - 본인 환경에 맞게 설치
-pip uninstall torch torchvision torchaudio
-pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
-
-```
-
-## 프로젝트 실행
-(.venv) python main_logging.py
-
-## 디버깅 모드 실행
-.vscode/launch.json 에 python 에 가상환경 패스 추가  
-Ctrl + Shift + P 하고 Python: Select Interpreter 로 가상환경 패스 선택
+자세한 설치 및 환경설정 방법은 [Setup Guide](docs/setup_guide.md)를 참고하세요.
