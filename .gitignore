@@ -19,3 +19,6 @@ venv
 
 # ignore 
 */ignore/*
+
+# MY PAPER
+utils/reward/dspy_hierarchical_reward.py
