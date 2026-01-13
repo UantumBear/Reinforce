@@ -16,10 +16,11 @@ import os
 def load_data_for_dspy():
     # 1. 파일 경로 (본인 경로에 맞게 수정)
     data_path = "datasets/original/didi0di/klue-mrc-ko-rag-cot/search_result_3.csv"
+    dataset_name = "klue-mrc-ko-rag-cot"  # 데이터셋 식별용
     
     if not os.path.exists(data_path):
         print(f"[ERROR] 파일을 찾을 수 없습니다: {data_path}")
-        return []
+        return [], ""
 
     print(f"[INFO] 데이터 로딩 중...: {data_path}")
     df = pd.read_csv(data_path)
@@ -47,11 +48,12 @@ def load_data_for_dspy():
         dataset.append(example)
 
     print(f"[SUCCESS] 총 {len(dataset)}개의 데이터가 변환되었습니다.")
-    return dataset
+    return dataset, dataset_name
 
 if __name__ == "__main__":
-    data = load_data_for_dspy()
+    data, dataset_name = load_data_for_dspy()
     if data:
+        print(f"\n[INFO] 데이터셋: {dataset_name}")
         print("\n[INFO] 변환된 데이터 확인 (Context 일부):")
         # 첫 번째 데이터의 문맥 앞부분만 출력해서 잘 합쳐졌는지 확인
         print(data[0].context[:200])

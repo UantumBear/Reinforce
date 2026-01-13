@@ -34,12 +34,12 @@ def setup_dspy_llm(verbose=True):
         print("[CHECK] Azure 설정 확인:")
         print(f"   - API Key: {'설정됨' if Env.AZURE_OPENAI_API_KEY else '없음'}")
         print(f"   - Endpoint: {Env.AZURE_OPENAI_ENDPOINT}")  
-        print(f"   - Deployment: {Env.AZURE_GPT4O_MINI_DEPLOYMENT}")
+        print(f"   - Deployment: {Env.AZURE_GPT4DOT1_DEPLOYMENT}")
         print()
     
     # LLM 객체 생성
     lm = dspy.LM(
-        model=f"azure/{Env.AZURE_GPT4O_MINI_DEPLOYMENT}",
+        model=f"azure/{Env.AZURE_GPT4DOT1_DEPLOYMENT}", # AZURE_GPT4O_MINI_DEPLOYMENT
         api_key=Env.AZURE_OPENAI_API_KEY,
         api_base=Env.AZURE_OPENAI_ENDPOINT,
         api_version=Env.AZURE_OPENAI_API_VERSION
