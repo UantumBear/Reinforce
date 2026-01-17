@@ -3,123 +3,210 @@
 """
 
 import os
-from utils.log.logging import logger
+import sys
+from pathlib import Path
+from dotenv import load_dotenv 
 
 
-base_dir = os.path.dirname(os.path.abspath(__file__)) # 현재 파일 위치 (conf/)
-project_root = os.path.dirname(base_dir)         # 상위 폴더 (Project Root)
+# 로거는 순환 참조 방지를 위해 여기서는 간단한 print나 logging 모듈을 직접 쓰는 게 안전할 수 있음
+# 기존 utils.log.logging 사용 시 순환 참조가 없다면 그대로 사용 가능
+try:
+    from utils.log.logging import logger
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+
+# 1. 경로 설정 (pathlib 사용)
+BASE_DIR = Path(__file__).resolve().parent # conf/  (== os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = BASE_DIR.parent             # 상위 폴더, Project Root
 
 
-# 환경변수
-class Env():
+class AppConfig:
+    """
+    환경변수 및 설정값을 관리하는 클래스
+    실제 값은 Settings.setup() 호출 시 로드됨
+    """
+
     """ 초기값 선언, 실제 값은 setup_environment() 실행 후 갱신 """
-    # AZURE
+    # [경로]
+    PROJECT_ROOT = PROJECT_ROOT
+    DATA_DIR = PROJECT_ROOT / "data"
+    LOG_DIR = PROJECT_ROOT / "logs"
+
+    # [공통 설정]
     USE_AZURE = None
+
+    # [현재 활성화된 모델 정보 (Agent는 이것만 참조하면 됨)]
+    GENERATOR_MODEL = None  # 실제 사용할 모델명 (예: gpt-4, gemini-pro)
+    EMBEDDING_MODEL = None  # 임베딩 모델명
+    API_KEY = None          # 현재 활성화된 API 키
+    API_BASE = None         # Endpoint
+    API_VERSION = None
+
+    # [Azure Raw Config] 
     AZURE_OPENAI_API_KEY = None
     AZURE_OPENAI_ENDPOINT = None
     AZURE_OPENAI_API_VERSION = None
     AZURE_GPT5_CHAT_DEPLOYMENT = None
     AZURE_GPT4O_MINI_DEPLOYMENT = None
-    # GOOGLE
+    AZURE_GPT4DOT1_DEPLOYMENT = None
+    # [Google Raw Config]
     GOOGLE_API_KEY = None
 
-    # DIR
-    PROJECT_ROOT = project_root
 
-    @staticmethod
-    def load_env_file(env_file_path: str) -> None:
+    @classmethod
+    def setup(cls):
         """
-        .env 파일에서 환경변수를 로드하는 함수
-        
-        Args:
-            env_file_path (str): .env 파일의 경로
+        [하이브리드 설정 로드]
+        1. 로컬 개발 환경: .env 및 key/*.env 파일에서 설정을 읽어옵니다.
+        2. 서버 배포 환경: 이미 OS 환경변수에 설정된 값이 있다면 그걸 우선합니다.
         """
-        try:
-            if os.path.exists(env_file_path):
-                with open(env_file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        # 빈 줄이나 주석 무시
-                        if not line or line.startswith('#'):
-                            continue
-                        # KEY=VALUE 형태 파싱
-                        if '=' in line:
-                            key, value = line.split('=', 1)
-                            os.environ[key.strip()] = value.strip()
-                            logger.info(f"환경변수 로드됨: env_file_path: {env_file_path}, {key.strip()}")
-            else:
-                logger.info(f"환경변수 파일을 찾을 수 없습니다: {env_file_path}")
-        except Exception as e:
-            logger.error(f"환경변수 파일 로드 중 오류: {e}")
+        # 1. 메인 .env 로드 (로컬/서버 공통)
+        # override=False: 서버의 시스템 환경변수가 있다면 덮어쓰지 않음 (서버 우선)
+        main_env_path = cls.PROJECT_ROOT / ".env"
+        if main_env_path.exists():
+            load_dotenv(main_env_path, override=False)
 
-    @staticmethod
-    def setup_environment():
-        """환경변수 파일 로드 및 설정"""
-        current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
-        # 먼저 루트의 .env 파일에서 USE_AZURE 설정 로드
-        main_env_path = os.path.join(current_dir, ".env")
-        if os.path.exists(main_env_path):
-            logger.info(f"메인 환경변수 파일 로드: {main_env_path}")
-            Env.load_env_file(main_env_path)
-            
-        # USE_AZURE 값에 따라 적절한 환경변수 파일 로드
+        # 2. USE_AZURE 플래그 확인
         use_azure_raw = os.getenv("USE_AZURE", "False")
-        use_azure = use_azure_raw.lower() in ("true", "1", "yes", "on")
-        
-        if use_azure:
-            logger.info("Azure 모드로 실행 - azure.env 로드")
-            azure_env_path = os.path.join(current_dir, "key", "azure.env")
-            if os.path.exists(azure_env_path):
-                Env.load_env_file(azure_env_path)
-                logger.info(f"Azure 환경변수 파일 로드: {azure_env_path}")
-                # AZURE
-                Env.USE_AZURE = os.getenv("USE_AZURE", "False").lower() in ("true", "1", "yes", "on")
-                Env.AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-                Env.AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-                Env.AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
-                Env.AZURE_GPT5_CHAT_DEPLOYMENT = os.getenv("AZURE_GPT5_CHAT_DEPLOYMENT")
-                Env.AZURE_GPT4O_MINI_DEPLOYMENT = os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT")
-               
-            else:
-                logger.error(f"Azure 환경변수 파일을 찾을 수 없습니다: {azure_env_path}")
-        else:
-            logger.info("Gemini 모드로 실행 - gemini.env 로드")
-            gemini_env_path = os.path.join(current_dir, "key", "gemini.env")
-            if os.path.exists(gemini_env_path):
-                Env.load_env_file(gemini_env_path)
-                logger.info(f"Gemini 환경변수 파일 로드: {gemini_env_path}")
-                 # GOOGLE
-                Env.GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-            else:
-                logger.error(f"Gemini 환경변수 파일을 찾을 수 없습니다: {gemini_env_path}")
-            
-        logger.info(f"최종 USE_AZURE 설정: {use_azure} (원본값: {use_azure_raw})")
-        logger.info("환경변수 파일 로드 완료")
+        cls.USE_AZURE = str(use_azure_raw).lower() in ("true", "1", "yes", "on")
 
-    @staticmethod
-    def check_google_api_key():
-        """Google API Key 확인 및 안내"""
-        if "GOOGLE_API_KEY" not in os.environ:
-            print("[GUIDE] 실행을 위해 Google AI Studio 무료 키가 필요합니다.")
-            # os.environ["GOOGLE_API_KEY"] = input("Google API Key 입력: ") # Colab 등에서 사용 시
-            return False
-        return True
-    
-    @staticmethod
-    def check_azure_api_key():
-        """Azure API Key 확인"""
-        # Azure 사용 시 필요한 필수 키들이 있는지 체크
-        required_keys = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"]
-        missing_keys = [key for key in required_keys if key not in os.environ]
+        # 3. 로컬 전용 키 파일 로드 시도 (key 폴더)
+        if cls.USE_AZURE:
+            azure_env_path = cls.PROJECT_ROOT / "key/azure.env"
+            if azure_env_path.exists():
+                logger.info(f">>> [Local] Azure 키 파일을 로드합니다: {azure_env_path}")
+                load_dotenv(azure_env_path, override=True) # 로컬 파일이 우선
+            else:
+                logger.info(">>> [Server/Env] Azure 키 파일이 없습니다. 시스템 환경변수를 확인합니다.")
+            
+            # 매핑 실행
+            cls._configure_azure()
+            
+        else:
+            gemini_env_path = cls.PROJECT_ROOT / "key/gemini.env"
+            if gemini_env_path.exists():
+                logger.info(f">>> [Local] Gemini 키 파일을 로드합니다: {gemini_env_path}")
+                load_dotenv(gemini_env_path, override=True)
+            else:
+                logger.info(">>> [Server/Env] Gemini 키 파일이 없습니다. 시스템 환경변수를 확인합니다.")
+            
+            # 매핑 실행
+            cls._configure_google()
+
+        # 4. [최종 검증] 파일이 있든 없든, 결과적으로 API KEY가 세팅되었는가?
+        if not cls.API_KEY:
+            logger.error("!!! [CRITICAL] API Key가 로드되지 않았습니다. !!!")
+            logger.error("로컬이라면 key/*.env 파일을, 서버라면 환경변수 설정을 확인해주세요.")
+            sys.exit(1)
+
+    @classmethod
+    def _configure_azure(cls):
+        """Azure 환경변수를 공통 변수에 매핑"""
+        cls.AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+        cls.AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+        cls.AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
         
-        if missing_keys:
-            logger.error(f"[Env] Azure 관련 필수 키가 누락되었습니다: {missing_keys}")
-            print("[GUIDE] key/azure.env 파일에 다음 키들이 정의되어 있어야 합니다:")
-            print(" - AZURE_OPENAI_API_KEY")
-            print(" - AZURE_OPENAI_ENDPOINT")
-            print(" - AZURE_OPENAI_API_VERSION (Optional)")
-            return False
-        return True
+        # 모델명 매핑 (여기서 사용할 모델을 지정)
+        # 예: .env에 AZURE_GPT4DOT1_DEPLOYMENT=gpt-4-turbo 라고 되어 있다면
+        cls.AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_GPT4DOT1_DEPLOYMENT") 
+
+        # [중요] Agent가 사용할 공통 인터페이스 설정
+        cls.API_KEY = cls.AZURE_OPENAI_API_KEY
+        cls.API_BASE = cls.AZURE_OPENAI_ENDPOINT
+        cls.API_VERSION = cls.AZURE_OPENAI_API_VERSION
+        cls.GENERATOR_MODEL = cls.AZURE_DEPLOYMENT_NAME
+        
+        # 유효성 검사
+        if not cls.API_KEY or not cls.API_BASE:
+            logger.error("Azure 필수 설정(Key, Endpoint)이 누락되었습니다.")
+
+    @classmethod
+    def _configure_google(cls):
+        """Google 환경변수를 공통 변수에 매핑"""
+        cls.GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+        
+        # [중요] Agent가 사용할 공통 인터페이스 설정
+        cls.API_KEY = cls.GOOGLE_API_KEY
+        cls.GENERATOR_MODEL = "gemini-1.5-pro" # 혹은 os.getenv로 받기
+        
+        if not cls.API_KEY:
+            logger.warning("Google API Key가 설정되지 않았습니다.")
+
+
+Settings = AppConfig
+
+
+
+    # @staticmethod
+    # def setup_environment():
+    #     """환경변수 파일 로드 및 설정"""
+    #     current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+    #     # 먼저 루트의 .env 파일에서 USE_AZURE 설정 로드
+    #     main_env_path = os.path.join(current_dir, ".env")
+    #     if os.path.exists(main_env_path):
+    #         logger.info(f"메인 환경변수 파일 로드: {main_env_path}")
+    #         Env.load_env_file(main_env_path)
+            
+    #     # USE_AZURE 값에 따라 적절한 환경변수 파일 로드
+    #     use_azure_raw = os.getenv("USE_AZURE", "False")
+    #     use_azure = use_azure_raw.lower() in ("true", "1", "yes", "on")
+        
+    #     if use_azure:
+    #         logger.info("Azure 모드로 실행 - azure.env 로드")
+    #         azure_env_path = os.path.join(current_dir, "key", "azure.env")
+    #         if os.path.exists(azure_env_path):
+    #             Env.load_env_file(azure_env_path)
+    #             logger.info(f"Azure 환경변수 파일 로드: {azure_env_path}")
+    #             # AZURE
+    #             Env.USE_AZURE = os.getenv("USE_AZURE", "False").lower() in ("true", "1", "yes", "on")
+    #             Env.AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+    #             Env.AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+    #             Env.AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+    #             Env.AZURE_GPT5_CHAT_DEPLOYMENT = os.getenv("AZURE_GPT5_CHAT_DEPLOYMENT")
+    #             Env.AZURE_GPT4O_MINI_DEPLOYMENT = os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT")
+    #             Env.AZURE_GPT4DOT1_DEPLOYMENT = os.getenv("AZURE_GPT4DOT1_DEPLOYMENT")
+               
+    #         else:
+    #             logger.error(f"Azure 환경변수 파일을 찾을 수 없습니다: {azure_env_path}")
+    #     else:
+    #         logger.info("Gemini 모드로 실행 - gemini.env 로드")
+    #         gemini_env_path = os.path.join(current_dir, "key", "gemini.env")
+    #         if os.path.exists(gemini_env_path):
+    #             Env.load_env_file(gemini_env_path)
+    #             logger.info(f"Gemini 환경변수 파일 로드: {gemini_env_path}")
+    #              # GOOGLE
+    #             Env.GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    #         else:
+    #             logger.error(f"Gemini 환경변수 파일을 찾을 수 없습니다: {gemini_env_path}")
+            
+    #     logger.info(f"최종 USE_AZURE 설정: {use_azure} (원본값: {use_azure_raw})")
+    #     logger.info("환경변수 파일 로드 완료")
+
+    # @staticmethod
+    # def check_google_api_key():
+    #     """Google API Key 확인 및 안내"""
+    #     if "GOOGLE_API_KEY" not in os.environ:
+    #         print("[GUIDE] 실행을 위해 Google AI Studio 무료 키가 필요합니다.")
+    #         # os.environ["GOOGLE_API_KEY"] = input("Google API Key 입력: ") # Colab 등에서 사용 시
+    #         return False
+    #     return True
+    
+    # @staticmethod
+    # def check_azure_api_key():
+    #     """Azure API Key 확인"""
+    #     # Azure 사용 시 필요한 필수 키들이 있는지 체크
+    #     required_keys = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"]
+    #     missing_keys = [key for key in required_keys if key not in os.environ]
+        
+    #     if missing_keys:
+    #         logger.error(f"[Env] Azure 관련 필수 키가 누락되었습니다: {missing_keys}")
+    #         print("[GUIDE] key/azure.env 파일에 다음 키들이 정의되어 있어야 합니다:")
+    #         print(" - AZURE_OPENAI_API_KEY")
+    #         print(" - AZURE_OPENAI_ENDPOINT")
+    #         print(" - AZURE_OPENAI_API_VERSION (Optional)")
+    #         return False
+    #     return True
     
 
