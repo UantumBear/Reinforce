@@ -28,3 +28,13 @@ pip install torch torchvision torchaudio --index-url [https://download.pytorch.o
 ## 디버깅 모드 실행
 .vscode/launch.json 에 python 에 가상환경 패스 추가  
 Ctrl + Shift + P 하고 Python: Select Interpreter 로 가상환경 패스 선택
+
+
+---
+
+# VSCode Extension 추천
+
+#### csv 뷰어
+##### ReprEng (Identifier=repreng.csv, Version=1.2.2)  
+##### Markdown Preview Mermaid Support 
+md 파일에서 다이어그램을 그려주는 도구.
