@@ -49,7 +49,7 @@ class AppConfig:
     AZURE_OPENAI_API_VERSION = None
     AZURE_GPT5_CHAT_DEPLOYMENT = None
     AZURE_GPT4O_MINI_DEPLOYMENT = None
-    AZURE_GPT4DOT1_DEPLOYMENT = None
+    AZURE_GPT5_NANO_DEPLOYMENT = None
     # [Google Raw Config]
     GOOGLE_API_KEY = None
 
@@ -108,8 +108,8 @@ class AppConfig:
         cls.AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
         
         # 모델명 매핑 (여기서 사용할 모델을 지정)
-        # 예: .env에 AZURE_GPT4DOT1_DEPLOYMENT=gpt-4-turbo 라고 되어 있다면
-        cls.AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_GPT4DOT1_DEPLOYMENT") 
+        # 예: .env에 AZURE_GPT5_NANO_DEPLOYMENT=gpt-4-turbo 라고 되어 있다면
+        cls.AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
 
         # [중요] Agent가 사용할 공통 인터페이스 설정
         cls.API_KEY = cls.AZURE_OPENAI_API_KEY
@@ -166,7 +166,7 @@ Settings = AppConfig
     #             Env.AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
     #             Env.AZURE_GPT5_CHAT_DEPLOYMENT = os.getenv("AZURE_GPT5_CHAT_DEPLOYMENT")
     #             Env.AZURE_GPT4O_MINI_DEPLOYMENT = os.getenv("AZURE_GPT4O_MINI_DEPLOYMENT")
-    #             Env.AZURE_GPT4DOT1_DEPLOYMENT = os.getenv("AZURE_GPT4DOT1_DEPLOYMENT")
+    #            
                
     #         else:
     #             logger.error(f"Azure 환경변수 파일을 찾을 수 없습니다: {azure_env_path}")
