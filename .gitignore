@@ -5,6 +5,8 @@
 datasets/samples/*
 datasets/original/*/*.csv
 datasets/original/*/*/*.csv
+datasets/practice/*
+datasets/results/*
 # API KEYS
 key
 key/*
