@@ -2,11 +2,17 @@
 */__pycache__/*
 *.pyc
 
-datasets/samples/*
-datasets/original/*/*.csv
-datasets/original/*/*/*.csv
-datasets/practice/*
-datasets/results/*
+datafile/samples/*
+datafile/original/*/*.csv
+datafile/original/*/*/*.csv
+datafile/practice/*
+datafile/results/*
+*.csv
+*.xlsx
+
+# git rm --cached *.csv
+# git commit -m "Stop tracking csv files"
+
 # API KEYS
 key
 key/*

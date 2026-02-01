@@ -15,7 +15,7 @@ import os
 
 def load_data_for_dspy():
     # 1. 파일 경로 (본인 경로에 맞게 수정)
-    data_path = "datasets/original/didi0di/klue-mrc-ko-rag-cot/search_result_3.csv"
+    data_path = "datafile/original/didi0di/klue-mrc-ko-rag-cot/search_result_3.csv"
     dataset_name = "klue-mrc-ko-rag-cot"  # 데이터셋 식별용
     
     if not os.path.exists(data_path):
