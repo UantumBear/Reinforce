@@ -9,6 +9,7 @@
 """
 import dspy
 from agent.prompts.optimizer_llm import OPTIMIZER_SYSTEM_PROMPT
+from infrastructure.llm_client import get_optimizer_llm
 
 """
 Optimizer LLM 역할 정의
@@ -34,9 +35,12 @@ PromptOptimizerAgent 클래스 정의
 """
 class PromptOptimizerAgent:
     def __init__(self):
+        # [중앙화된 LLM 관리]
+        # infrastructure/llm_client.py에서 관리되는 Optimizer LLM 가져오기
+        self.optimizer_lm = get_optimizer_llm()
+        
         # [PromptOptimizerAgent Module 초기화]
-        # OptimizerLLM 시그니처(설계도)를 기반으로 동작하는 '실행 가능한 AI 모듈'을 생성한다. 
-
+        # 기본 모듈만 생성 (LLM은 실행 시 컨텍스트로 지정)
         self.llm_module = dspy.Predict(OptimizerLLM)
         # self.llm_module2 = textgrad.function(OptimizerLLM)
         """
@@ -81,13 +85,14 @@ class PromptOptimizerAgent:
         if not fail_case_feedback or fail_case_feedback == "None":
             return None
 
-        # 3. LLM에게 전달 (Field Name을 attempted_instruction으로 변경)
-        response = self.llm_module(
-            attempted_instruction=attempted_instruction,  # Signature의 attempted_instruction에 매핑
-            total_score=total_score_str,            # Signature의 total_score에 매핑
-            similarity_score=similarity_score_str,  # Signature의 similarity_score에 매핑
-            verbal_feedback=verbal_feedback,
-            fail_case_feedback=fail_case_feedback
-        )
+        # 3. Optimizer LLM 컨텍스트에서 실행
+        with dspy.context(lm=self.optimizer_lm):
+            response = self.llm_module(
+                attempted_instruction=attempted_instruction,  # Signature의 attempted_instruction에 매핑
+                total_score=total_score_str,            # Signature의 total_score에 매핑
+                similarity_score=similarity_score_str,  # Signature의 similarity_score에 매핑
+                verbal_feedback=verbal_feedback,
+                fail_case_feedback=fail_case_feedback
+            )
 
         return response.new_instruction
