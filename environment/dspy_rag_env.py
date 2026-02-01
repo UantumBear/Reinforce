@@ -101,7 +101,7 @@ class DSPyRAGEnv:
             # print(f"[Env] Instruction Updated: {action[:50]}...")
 
         # 2. [Simulation] 평가 및 피드백 수집
-        total_score = 0
+        scores = []  # 개별 점수들을 저장
         failed_examples = []
         analyses = []
         
@@ -112,7 +112,7 @@ class DSPyRAGEnv:
             
             # 채점 (Metric 함수 내부에서 pred.feedback_log에 피드백을 심어줌)
             score = self.metric(example, pred)
-            total_score += score
+            scores.append(score)  # 개별 점수 저장
             
             # [State Construction] 실패 사례 및 Verbal Feedback 수집
             if score < 1.0:
@@ -140,7 +140,7 @@ class DSPyRAGEnv:
                 failed_examples.append(log_entry)
 
         # 3. [Result Aggregation]
-        avg_score = total_score / len(self.trainset)
+        avg_score = sum(scores) / len(scores) if scores else 0.0  # 평균 점수 계산
         self.last_score = avg_score
         
         # Verbal Feedback 요약 (너무 길면 앞부분만 사용하거나 연결)
