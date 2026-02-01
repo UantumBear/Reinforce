@@ -42,6 +42,8 @@ class AppConfig:
     API_KEY = None          # 현재 활성화된 API 키
     API_BASE = None         # Endpoint
     API_VERSION = None
+    OPTIMIZER_MODEL = None  # Optimizer LLM 모델명
+    TESTER_MODEL = None     # Target/Tester LLM 모델명
 
     # [Azure Raw Config] 
     AZURE_OPENAI_API_KEY = None
@@ -50,8 +52,29 @@ class AppConfig:
     AZURE_GPT5_CHAT_DEPLOYMENT = None
     AZURE_GPT4O_MINI_DEPLOYMENT = None
     AZURE_GPT5_NANO_DEPLOYMENT = None
+    AZURE_GPT5_MINI_DEPLOYMENT = None
+    
+    # [Azure 임베딩 모델 설정]
+    AZURE_EMBEDDING3_SMALL_DEPLOYMENT = None  # Azure 임베딩 deployment 이름 (예: text-embedding-3-small)
+    
+    # [LLM 분리 설정]
+    OPTIMIZER_MODEL = None
+    TESTER_MODEL = None
     # [Google Raw Config]
     GOOGLE_API_KEY = None
+    
+    # [Database Config] DB 관련 설정 추가
+    DB_HOST = None
+    DB_PORT = None
+    DB_USER = None
+    DB_PASSWORD = None
+    DB_NAME = None
+    DB_SSLMODE = None
+    DATABASE_URL = None
+    DB_POOL_SIZE = None
+    DB_MAX_OVERFLOW = None
+    DB_POOL_RECYCLE = None
+    DB_CONNECT_TIMEOUT = None
 
 
     @classmethod
@@ -94,7 +117,17 @@ class AppConfig:
             # 매핑 실행
             cls._configure_google()
 
-        # 4. [최종 검증] 파일이 있든 없든, 결과적으로 API KEY가 세팅되었는가?
+        # 4. DB 설정 파일 로드 (공통)
+        db_env_path = cls.PROJECT_ROOT / "key/db.env"
+        if db_env_path.exists():
+            logger.info(f">>> [Local] DB 설정 파일을 로드합니다: {db_env_path}")
+            load_dotenv(db_env_path, override=True)
+            cls._configure_database()
+        else:
+            logger.warning(">>> [Warning] DB 설정 파일이 없습니다. 시스템 환경변수를 확인합니다.")
+            cls._configure_database()  # 시스템 환경변수에서 로드 시도
+
+        # 5. [최종 검증] 파일이 있든 없든, 결과적으로 API KEY가 세팅되었는가?
         if not cls.API_KEY:
             logger.error("!!! [CRITICAL] API Key가 로드되지 않았습니다. !!!")
             logger.error("로컬이라면 key/*.env 파일을, 서버라면 환경변수 설정을 확인해주세요.")
@@ -109,13 +142,21 @@ class AppConfig:
         
         # 모델명 매핑 (여기서 사용할 모델을 지정)
         # 예: .env에 AZURE_GPT5_NANO_DEPLOYMENT=gpt-4-turbo 라고 되어 있다면
-        cls.AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
+        # cls.AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
+        cls.AZURE_GPT5_NANO_DEPLOYMENT = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
+        cls.AZURE_GPT5_MINI_DEPLOYMENT = os.getenv("AZURE_GPT5_MINI_DEPLOYMENT") 
+
+        # 임베딩 모델 설정
+        cls.AZURE_EMBEDDING3_SMALL_DEPLOYMENT = os.getenv("AZURE_EMBEDDING3_SMALL_DEPLOYMENT") # text-embedding-3-small
+
 
         # [중요] Agent가 사용할 공통 인터페이스 설정
         cls.API_KEY = cls.AZURE_OPENAI_API_KEY
         cls.API_BASE = cls.AZURE_OPENAI_ENDPOINT
         cls.API_VERSION = cls.AZURE_OPENAI_API_VERSION
-        cls.GENERATOR_MODEL = cls.AZURE_DEPLOYMENT_NAME
+        # cls.GENERATOR_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
+        cls.OPTIMIZER_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
+        cls.TESTER_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
         
         # 유효성 검사
         if not cls.API_KEY or not cls.API_BASE:
@@ -129,9 +170,39 @@ class AppConfig:
         # [중요] Agent가 사용할 공통 인터페이스 설정
         cls.API_KEY = cls.GOOGLE_API_KEY
         cls.GENERATOR_MODEL = "gemini-1.5-pro" # 혹은 os.getenv로 받기
+        cls.OPTIMIZER_MODEL = os.getenv("OPTIMIZER_MODEL", cls.GENERATOR_MODEL)
+        cls.TESTER_MODEL = os.getenv("TESTER_MODEL", cls.GENERATOR_MODEL)
         
         if not cls.API_KEY:
             logger.warning("Google API Key가 설정되지 않았습니다.")
+    
+    @classmethod
+    def _configure_database(cls):
+        """Database 환경변수를 클래스 변수에 매핑"""
+        cls.DB_HOST = os.getenv("DB_HOST", "localhost")
+        cls.DB_PORT = int(os.getenv("DB_PORT", "5432"))
+        cls.DB_USER = os.getenv("DB_USER", "postgres")
+        cls.DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
+        cls.DB_NAME = os.getenv("DB_NAME", "reinforcement_learning")
+        cls.DB_SSLMODE = os.getenv("DB_SSLMODE", "prefer")
+        cls.DATABASE_URL = os.getenv("DATABASE_URL")
+        cls.DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+        cls.DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+        cls.DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+        cls.DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "30"))
+        
+        # DATABASE_URL이 없으면 개별 설정으로 생성
+        if not cls.DATABASE_URL:
+            cls.DATABASE_URL = f"postgresql://{cls.DB_USER}:{cls.DB_PASSWORD}@{cls.DB_HOST}:{cls.DB_PORT}/{cls.DB_NAME}?sslmode={cls.DB_SSLMODE}"
+            
+        logger.info(f">>> [DB Config] Host: {cls.DB_HOST}:{cls.DB_PORT}, DB: {cls.DB_NAME}")
+    
+    @classmethod
+    def get_database_url(cls) -> str:
+        """SQLAlchemy용 DATABASE_URL 반환"""
+        if not cls.DATABASE_URL:
+            cls._configure_database()
+        return cls.DATABASE_URL
 
 
 Settings = AppConfig
