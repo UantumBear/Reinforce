@@ -42,6 +42,10 @@ class RlOptimizationLog(Base):
     is_faithful = Column(String(20), nullable=True)
     is_style_match = Column(String(20), nullable=True)
     
+    # 헌법(Constitution) 위반 여부
+    constitution_status = Column(String(20), nullable=True, default='Pass')
+    constitution_violation_reason = Column(Text, nullable=True)
+    
     critical_review = Column(Text, nullable=True)
     full_analysis = Column(Text, nullable=True)
     
