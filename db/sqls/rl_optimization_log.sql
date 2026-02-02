@@ -40,4 +40,9 @@ ALTER TABLE rl_optimization_logs ADD COLUMN optimizer_model_nm VARCHAR(100);
 ALTER TABLE rl_optimization_logs ADD COLUMN optimizer_model_provider VARCHAR(50);
 ALTER TABLE rl_optimization_logs ADD COLUMN tester_model_nm VARCHAR(100);
 ALTER TABLE rl_optimization_logs ADD COLUMN tester_model_provider VARCHAR(50);
+
+-- 컬럼 추가: 헌법(Constitution) 위반 여부
+ALTER TABLE rl_optimization_logs ADD COLUMN constitution_status VARCHAR(20) DEFAULT 'Pass';
+ALTER TABLE rl_optimization_logs ADD COLUMN constitution_violation_reason TEXT;
+
 -- REAL 이란 PostgresSQL 의 부동소수점 타입 중 하나이다.
