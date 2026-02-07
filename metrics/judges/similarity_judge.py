@@ -27,7 +27,7 @@ class SimilarityJudge:
         """
         try:
             similarity = self.embed_client.calculate_similarity(gold_answer, predicted_answer)
-            # 0~1 범위 보장
+            # 0~1 범위를 보장하여 유사도 반환
             return max(0.0, min(1.0, similarity))
         except Exception as e:
             print(f"[WARNING] 임베딩 유사도 계산 실패: {e}")
