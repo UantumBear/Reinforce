@@ -1,7 +1,9 @@
 """
-@경로 : utils/datasets/klue_mrc.py
+@경로 : scripts/data_prep/download_klue_mrc.py
 @설명 : Hugging Face에서 KLUE MRC 데이터를 로드하고 랜덤 샘플을 제공하는 클래스
-@명령어 : python utils/datasets/klue_mrc.py
+@명령어 : python scripts/data_prep/download_klue_mrc.py
+
+- 26.02.07 구조 변경 후 테스트 해보지 않아서 테스트 필요
 """
 import random
 import json

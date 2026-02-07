@@ -1,7 +1,10 @@
 """
-@경로: utils/datasets/klue_rag.py
+@경로: scripts/data_prep/download_klue_rag.py
 @설명: HuggingFace의 KLUE MRC KO RAG 데이터셋을 로드하고 샘플 데이터를 저장/확인할 수 있는 클래스
-@명령어: python utils/datasets/klue_rag.py
+@명령어: python scripts/data_prep/download_klue_rag.py
+
+- 26.02.07 구조 변경 후 테스트 해보지 않아서 테스트 필요
+
 """
 import random
 import json
