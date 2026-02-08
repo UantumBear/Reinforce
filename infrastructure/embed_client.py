@@ -7,6 +7,16 @@ import sys
 from pathlib import Path
 from conf.config import Settings
 
+# RAGAS/LangChain 지원을 위한 라이브러리 임포트
+# RAGAS 에서 사용하는 임베딩 모델은 langchain 기반이기에, 모델의 객체 타입을 맞추어 주어야 한다.
+try:
+    from langchain_openai import AzureOpenAIEmbeddings
+    from langchain_huggingface import HuggingFaceEmbeddings
+except ImportError:
+    HuggingFaceEmbeddings = None
+    AzureOpenAIEmbeddings = None
+
+
 class EmbedClient:
     """
     임베딩 클라이언트 통합 관리 클래스
@@ -21,9 +31,10 @@ class EmbedClient:
             use_azure (bool): True면 Azure, False면 로컬 모델 사용
             auto_load (bool): 초기화 시 자동으로 모델 로드 여부
         """
-        self.use_azure = use_azure
-        self._local_model = None
-        self._azure_client = None
+        self.use_azure = use_azure       # Azure 의 임베딩 모델 사용 여부
+        self._local_model = None         # 로컬 임베딩 모델
+        self._azure_client = None        # Azure 임베딩 모델 사용을 위한 클라이언트
+        self._langchain_instance = None  # (RAGAS 호환을 위한) LangChain 임베딩 인스턴스
         
         if auto_load:
             self.get_model()  # 미리 로드
@@ -159,7 +170,7 @@ class EmbedClient:
             client = self._get_azure_client()
             
             # Azure 임베딩 모델명 (설정에서 가져오거나 기본값)
-            embedding_model = getattr(Settings, 'AZURE_EMBEDDING3_SMALL_DEPLOYMENT', 'text-embedding-ada-002')
+            embedding_model = getattr(Settings, 'AZURE_EMBEDDING3_SMALL_DEPLOYMENT')
             
             # 두 텍스트의 임베딩 벡터 생성
             response1 = client.embeddings.create(input=[text1], model=embedding_model)
@@ -219,6 +230,41 @@ class EmbedClient:
         except Exception as e:
             print(f"[ERROR] Azure 임베딩 생성 실패: {e}")
             return None
+        
+    def get_langchain_instance(self):
+        """
+        [NEW] RAGAS 평가 등을 위한 LangChain 호환 임베딩 객체를 반환합니다.
+        """
+        if self._langchain_instance is not None:
+            return self._langchain_instance
+
+        if self.use_azure:
+            # [Case A] Azure 사용 시
+            if AzureOpenAIEmbeddings is None:
+                raise ImportError("langchain-openai가 설치되지 않았습니다.")
+                
+            print(f"[EmbedClient] LangChain용 Azure 모델 초기화: {Settings.AZURE_EMBEDDING_DEPLOYMENT}")
+            self._langchain_instance = AzureOpenAIEmbeddings(
+                azure_deployment=Settings.AZURE_EMBEDDING_DEPLOYMENT,
+                api_version=Settings.API_VERSION,
+                azure_endpoint=Settings.API_BASE,
+                api_key=Settings.API_KEY
+            )
+        else:
+            # [Case B] 로컬 모델 사용 시
+            if HuggingFaceEmbeddings is None:
+                raise ImportError("langchain-huggingface가 설치되지 않았습니다.")
+            
+            model_path = Settings.LOCAL_EMBEDDING_MODEL_PATH
+            print(f"[EmbedClient] LangChain용 로컬 모델 초기화: {model_path}")
+            
+            self._langchain_instance = HuggingFaceEmbeddings(
+                model_name=model_path,
+                model_kwargs={'device': 'cpu'}, # GPU가 있다면 'cuda'로 변경
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            
+        return self._langchain_instance
 
 
 # ================================================================

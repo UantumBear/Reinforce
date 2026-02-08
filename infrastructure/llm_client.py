@@ -1,16 +1,18 @@
 """
 @경로: infrastructure/llm_client.py
-@설명: DSPy LLM 초기화 및 환경설정 (Azure OpenAI 연결)
+@설명: DSPy/RAGAS 등 에서 사용할 LLM 및 임베딩 모델 초기화 및 환경설정
 """
 
 import dspy
 import sys
 from conf.config import Settings
 
+from infrastructure.embed_client import get_embedding_client
+
 def setup_lms(verbose=True):
     """
     테스터 LLM 환경을 설정하고 전역 configure를 수행
-    (Optimizer가 만든 프롬프트를 테스트하는 깨끗한 LLM)
+    (또한 RAGAS 모델도 초기화)
     
     @ verbose (bool): 설정 정보 출력 여부
     
@@ -29,6 +31,16 @@ def setup_lms(verbose=True):
         print(f"   - Model: {Settings.TESTER_MODEL}")
         print(f"   - Endpoint: {Settings.API_BASE}")
         print()
+        
+        # # RAGAS 설정 상태 표시
+        # if LANGCHAIN_AVAILABLE:
+        #     print("[CHECK] RAGAS 지원 준비 완료")
+        #     print(f"   - RAGAS Chat Model: {Settings.TESTER_MODEL}")
+        #     print(f"   - RAGAS Embedding: text-embedding-ada-002")
+        #     print()
+        # else:
+        #     print("[WARNING] RAGAS 지원 불가 - langchain-openai 설치 필요")
+        #     print()
     
     # Tester LLM 객체 생성 (깨끗한 LLM - 프롬프트 테스트용)
     lm = dspy.LM(
@@ -64,3 +76,36 @@ def get_optimizer_llm():
     )
     
     return optimizer_lm
+
+
+def get_ragas_model():
+    """
+    RAGAS 평가용 모델 반환
+    """
+    try:
+        # 1. Chat Model (평가자)
+        # RAGAS 평가자는 보통 성능 좋은 GPT-4급을 권장하지만, 설정에 따름
+        from langchain_openai import AzureChatOpenAI
+        
+        chat_model = AzureChatOpenAI(
+            azure_deployment=Settings.TESTER_MODEL,
+            api_version=Settings.API_VERSION,
+            azure_endpoint=Settings.API_BASE,
+            api_key=Settings.API_KEY,
+            temperature=0.0
+        )
+        
+        # 2. Embedding Model (유사도 계산용)
+        # [핵심 변경] embed_client에게 LangChain 객체 생성을 위임!
+        # config.py의 USE_AZURE_EMBEDDING 설정에 따라 알아서 가져옴
+        use_azure = getattr(Settings, "USE_AZURE_EMBEDDING", True) # 설정이 없으면 기본 True
+        
+        # 여기서 embed_client의 싱글톤 인스턴스를 가져오고 -> LangChain 객체를 달라고 함
+        embed_client = get_embedding_client(use_azure=use_azure)
+        embedding_model = embed_client.get_langchain_instance()
+        
+        return chat_model, embedding_model
+        
+    except Exception as e:
+        print(f"[Error] RAGAS 모델 초기화 실패: {e}")
+        return None, None

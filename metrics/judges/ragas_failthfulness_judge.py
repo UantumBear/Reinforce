@@ -2,6 +2,12 @@
 """
 @경로: metrics/judges/ragas_failthfulness_judge.py
 @설명: RAGAS 기반 신뢰도 평가기 래퍼
+- 이 답변이 주어진 문서 밖의 말을 하지 않았는가? 를 평가하기 위한 평가기 이다.
+- 논문의 주제가, 도메인 헌법이 중요한 RAG 시스템에서의 프롬프트 최적화이므로,
+  단순히 LLM에게 (dspy.pred 기반) "이 답변이 맥락에 충실한가?" 라고 묻는 방식으로는 신뢰할 수 없어서
+  RAGAS 기반의 평가기를 별도로 구현하여 사용한다. 
+
+- 문서 안에서 답안을 찾았는 지가 중요하다. (할루시네이션 방지 용도)
 """
 
 from typing import Optional, List, Union
