@@ -103,6 +103,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "pytz>=2025.2",
     "pyyaml>=6.0.3",
+    "ragas>=0.3.1",
     "referencing>=0.37.0",
     "regex>=2025.11.3",
     "requests>=2.32.5",
