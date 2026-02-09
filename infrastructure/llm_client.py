@@ -31,16 +31,6 @@ def setup_lms(verbose=True):
         print(f"   - Model: {Settings.TESTER_MODEL}")
         print(f"   - Endpoint: {Settings.API_BASE}")
         print()
-        
-        # # RAGAS 설정 상태 표시
-        # if LANGCHAIN_AVAILABLE:
-        #     print("[CHECK] RAGAS 지원 준비 완료")
-        #     print(f"   - RAGAS Chat Model: {Settings.TESTER_MODEL}")
-        #     print(f"   - RAGAS Embedding: text-embedding-ada-002")
-        #     print()
-        # else:
-        #     print("[WARNING] RAGAS 지원 불가 - langchain-openai 설치 필요")
-        #     print()
     
     # Tester LLM 객체 생성 (깨끗한 LLM - 프롬프트 테스트용)
     lm = dspy.LM(
@@ -81,28 +71,41 @@ def get_optimizer_llm():
 def get_ragas_model():
     """
     RAGAS 평가용 모델 반환
+    embed_client가 설정에 따라 알아서 선택한 모델을 사용
     """
     try:
         # 1. Chat Model (평가자)
         # RAGAS 평가자는 보통 성능 좋은 GPT-4급을 권장하지만, 설정에 따름
-        from langchain_openai import AzureChatOpenAI
+        # from langchain_openai import AzureChatOpenAI
+        # from langchain_openai.chat_models import AzureChatOpenAI # 공식 문서
+        from utils.tools.ragas.ragas_azure_wrapper import RagasAzureOpenAIWrapper
         
-        chat_model = AzureChatOpenAI(
-            azure_deployment=Settings.TESTER_MODEL,
-            api_version=Settings.API_VERSION,
+        # gpt-5-mini 모델은 temperature 파라미터를 지원하지 않으므로 제거
+        # chat_model = AzureChatOpenAI(
+        #     azure_deployment=Settings.RAGAS_CHAT_MODEL,
+        #     api_version=Settings.API_VERSION,
+        #     azure_endpoint=Settings.API_BASE,
+        #     api_key=Settings.API_KEY,
+        #     # temperature 파라미터를 제거하여 모델의 기본값 사용
+        # )
+        chat_model = RagasAzureOpenAIWrapper(
+            openai_api_version=Settings.API_VERSION,
             azure_endpoint=Settings.API_BASE,
-            api_key=Settings.API_KEY,
-            temperature=0.0
+            azure_deployment=Settings.RAGAS_CHAT_MODEL,
+            model=Settings.RAGAS_CHAT_MODEL,
+            validate_base_url=False,
+            max_retries=0, # 재시도 횟수를 0으로 설정 -> 에러 즉시 반환
         )
-        
+        # temperature=0.0, 1.0 이면 RAGAS 에서 에러남.
+
         # 2. Embedding Model (유사도 계산용)
-        # [핵심 변경] embed_client에게 LangChain 객체 생성을 위임!
-        # config.py의 USE_AZURE_EMBEDDING 설정에 따라 알아서 가져옴
-        use_azure = getattr(Settings, "USE_AZURE_EMBEDDING", True) # 설정이 없으면 기본 True
-        
-        # 여기서 embed_client의 싱글톤 인스턴스를 가져오고 -> LangChain 객체를 달라고 함
-        embed_client = get_embedding_client(use_azure=use_azure)
+        # embed_client가 내부 설정에 따라 알아서 선택하도록 단순화
+        embed_client = get_embedding_client()  # 기본값으로 알아서 결정
         embedding_model = embed_client.get_langchain_instance()
+        
+        print(f"[SUCCESS] RAGAS 모델 초기화 완료")
+        print(f"   - Chat Model: {Settings.RAGAS_CHAT_MODEL}")
+        print(f"   - Embedding Model: {type(embedding_model)}")
         
         return chat_model, embedding_model
         
