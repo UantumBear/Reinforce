@@ -62,7 +62,7 @@ class EmbedClient:
                 sys.exit(1)
             
             # 로컬 모델 경로 설정
-            model_path = Path("model/embedding/ko-sroberta-multitask")
+            model_path = Path(Settings.LOCAL_EMBEDDING_MODEL_PATH)
             
             # 절대 경로로 변환
             if not model_path.is_absolute():
