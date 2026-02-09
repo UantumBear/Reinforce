@@ -50,7 +50,7 @@ class AppConfig:
     AZURE_OPENAI_ENDPOINT = None
     AZURE_OPENAI_API_VERSION = None
     AZURE_GPT5_CHAT_DEPLOYMENT = None
-    AZURE_GPT4O_MINI_DEPLOYMENT = None
+    AZURE_GPTO4_MINI_DEPLOYMENT = None
     AZURE_GPT5_NANO_DEPLOYMENT = None
     AZURE_GPT5_MINI_DEPLOYMENT = None
     
@@ -62,6 +62,8 @@ class AppConfig:
     TESTER_MODEL = None
     # [Google Raw Config]
     GOOGLE_API_KEY = None
+    # [EMBEDDING 모델 설정]
+    LOCAL_EMBEDDING_MODEL_PATH = "model/embedding/ko-sroberta-multitask" # 이건 os 에서 읽지 않으므로 고정값으로 둠
     
     # [Database Config] DB 관련 설정 추가
     DB_HOST = None
@@ -145,18 +147,24 @@ class AppConfig:
         # cls.AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
         cls.AZURE_GPT5_NANO_DEPLOYMENT = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
         cls.AZURE_GPT5_MINI_DEPLOYMENT = os.getenv("AZURE_GPT5_MINI_DEPLOYMENT") 
+        cls.AZURE_GPTO4_MINI_DEPLOYMENT = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")
 
         # 임베딩 모델 설정
         cls.AZURE_EMBEDDING3_SMALL_DEPLOYMENT = os.getenv("AZURE_EMBEDDING3_SMALL_DEPLOYMENT") # text-embedding-3-small
-
+        # For RAGAS
+        cls.AZURE_EMBEDDING_DEPLOYMENT = cls.AZURE_EMBEDDING3_SMALL_DEPLOYMENT
 
         # [중요] Agent가 사용할 공통 인터페이스 설정
         cls.API_KEY = cls.AZURE_OPENAI_API_KEY
         cls.API_BASE = cls.AZURE_OPENAI_ENDPOINT
         cls.API_VERSION = cls.AZURE_OPENAI_API_VERSION
         # cls.GENERATOR_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
-        cls.OPTIMIZER_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
+        cls.OPTIMIZER_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT        
+        # 최적화 모델, 현재는 가장 싼 nano 를 쓰고 있지만, 전체 설계 완료 후에는 일반 모델로 변경하기
         cls.TESTER_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
+        # Tester 모델, 해당 모델은 따로 제약을 걸 이유가 없음, 아무 모델이나 사용하기.
+        cls.RAGAS_CHAT_MODEL = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")  # RAGAS 평가자 모델
+        # RAGAS 평가자 모델은 gpt-5-mini, gpt-5-nano 를 지원하지 않음 (temperature 파라미터 문제)
         
         # 유효성 검사
         if not cls.API_KEY or not cls.API_BASE:
@@ -172,6 +180,7 @@ class AppConfig:
         cls.GENERATOR_MODEL = "gemini-1.5-pro" # 혹은 os.getenv로 받기
         cls.OPTIMIZER_MODEL = os.getenv("OPTIMIZER_MODEL", cls.GENERATOR_MODEL)
         cls.TESTER_MODEL = os.getenv("TESTER_MODEL", cls.GENERATOR_MODEL)
+        
         
         if not cls.API_KEY:
             logger.warning("Google API Key가 설정되지 않았습니다.")
