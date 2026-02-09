@@ -80,19 +80,41 @@ class PromptOptimizerAgent:
         fail_case_feedback = state.get("fail_case_feedback", "") 
         verbal_feedback = state.get("verbal_feedback", "No analysis.")
 
+        print(f"    [DEBUG] Agent received state: total_score={total_score_str}, similarity_score={similarity_score_str}")
+        print(f"    [DEBUG] fail_case_feedback length: {len(fail_case_feedback)}, verbal_feedback length: {len(verbal_feedback)}")
         
-        # 피드백이 없으면(성공했으면) 행동하지 않음
-        if not fail_case_feedback or fail_case_feedback == "None":
+        # 초기 상태 체크 (N/A가 포함된 경우는 초기 상태로 간주)
+        is_initial_state = "[N/A]" in fail_case_feedback or "Initial State" in fail_case_feedback
+        
+        # 더 유연한 조건: 초기 상태가 아니고, 실패 피드백도 없고, 점수가 완벽하면 중단
+        current_score = float(state.get("current_similarity_score", 0.0))
+        if not is_initial_state and (not fail_case_feedback or len(fail_case_feedback.strip()) == 0) and current_score >= 0.95:
+            print("    [STOP] Perfect performance achieved, no optimization needed.")
             return None
+        
+        # 초기 상태이거나 개선 여지가 있다면 계속 진행
+        if is_initial_state:
+            print("    [INFO] Initial state detected, proceeding with first optimization.")
+            # 초기 상태에서는 기본 피드백 제공
+            if not fail_case_feedback or "[N/A]" in fail_case_feedback:
+                fail_case_feedback = "Initial optimization step. Please analyze the current instruction and improve it for better performance."
+        
+        print(f"    [INFO] Proceeding with optimization. Score: {current_score:.3f}")
 
         # 3. Optimizer LLM 컨텍스트에서 실행
-        with dspy.context(lm=self.optimizer_lm):
-            response = self.llm_module(
-                attempted_instruction=attempted_instruction,  # Signature의 attempted_instruction에 매핑
-                total_score=total_score_str,            # Signature의 total_score에 매핑
-                similarity_score=similarity_score_str,  # Signature의 similarity_score에 매핑
-                verbal_feedback=verbal_feedback,
-                fail_case_feedback=fail_case_feedback
-            )
-
-        return response.new_instruction
+        try:
+            with dspy.context(lm=self.optimizer_lm):
+                response = self.llm_module(
+                    attempted_instruction=attempted_instruction,  # Signature의 attempted_instruction에 매핑
+                    total_score=total_score_str,            # Signature의 total_score에 매핑
+                    similarity_score=similarity_score_str,  # Signature의 similarity_score에 매핑
+                    verbal_feedback=verbal_feedback,
+                    fail_case_feedback=fail_case_feedback
+                )
+            
+            print(f"    [DEBUG] Agent generated instruction length: {len(response.new_instruction) if response.new_instruction else 0}")
+            return response.new_instruction
+            
+        except Exception as e:
+            print(f"    [ERROR] Agent failed to generate new instruction: {e}")
+            return None
