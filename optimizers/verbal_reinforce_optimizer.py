@@ -239,6 +239,14 @@ class VerbalReinforceOptimizer(Teleprompter):
                 "Critical_Review": score_card.get("critical_review", "None"),
                 "Full_Analysis": log_data.get("Analysis", ""),
                 
+                # RAGAS 평가 점수들
+                "Ragas_Faithfulness_Score": score_card.get("ragas_faithfulness_score", None),
+                "Ragas_Answer_Relevancy_Score": score_card.get("ragas_answer_relevancy_score", None),
+                "Ragas_Context_Precision_Score": score_card.get("ragas_context_precision_score", None),
+                "Ragas_Context_Recall_Score": score_card.get("ragas_context_recall_score", None),
+                # "Ragas_Is_Faithful": score_card.get("ragas_is_faithful", None),
+                # "Ragas_Is_Relevant": score_card.get("ragas_is_relevant", None),
+                
                 # 시스템 메타데이터
                 "Is_Success": True,
                 "Error_Log": "",
@@ -412,6 +420,13 @@ class VerbalReinforceOptimizer(Teleprompter):
                     constitution_violation_reason=row['Constitution_Violation_Reason'],
                     critical_review=row['Critical_Review'],
                     full_analysis=row['Full_Analysis'],
+                    # RAGAS 평가 점수들
+                    ragas_faithfulness_score=row.get('Ragas_Faithfulness_Score'),
+                    ragas_answer_relevancy_score=row.get('Ragas_Answer_Relevancy_Score'),
+                    ragas_context_precision_score=row.get('Ragas_Context_Precision_Score'),
+                    ragas_context_recall_score=row.get('Ragas_Context_Recall_Score'),
+                    # ragas_is_faithful=row.get('Ragas_Is_Faithful'),
+                    # ragas_is_relevant=row.get('Ragas_Is_Relevant'),
                     is_success=row['Is_Success'],
                     error_log=row['Error_Log'],
                     created_at=row['Episode_Start_Time'] if pd.notnull(row['Episode_Start_Time']) else datetime.now()  # 실제 에피소드 시작 시간 사용
@@ -454,6 +469,14 @@ class VerbalReinforceOptimizer(Teleprompter):
             "Constitution_Violation_Reason": "Error",
             "Critical_Review": "Azure Content Policy Violation",
             "Full_Analysis": f"[System Exception] {error_msg}", # 실험 자체가 실패했음을 명시
+            
+            # RAGAS 평가 점수들 (실패 시 기본값)
+            "Ragas_Faithfulness_Score": None,
+            "Ragas_Answer_Relevancy_Score": None, 
+            "Ragas_Context_Precision_Score": None,
+            "Ragas_Context_Recall_Score": None,
+            # "Ragas_Is_Faithful": None,
+            # "Ragas_Is_Relevant": None,
             
             # 시스템 로그
             "Is_Success": False,
