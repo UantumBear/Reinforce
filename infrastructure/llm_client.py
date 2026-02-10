@@ -74,37 +74,40 @@ def get_ragas_model():
     embed_client가 설정에 따라 알아서 선택한 모델을 사용
     """
     try:
-        # 1. Chat Model (평가자)
-        # RAGAS 평가자는 보통 성능 좋은 GPT-4급을 권장하지만, 설정에 따름
-        # from langchain_openai import AzureChatOpenAI
-        # from langchain_openai.chat_models import AzureChatOpenAI # 공식 문서
-        from utils.tools.ragas.ragas_azure_wrapper import RagasAzureOpenAIWrapper
+        # 1. o4-mini 호환 커스텀 RAGAS 래퍼 클래스
+        from ragas.llms.base import LangchainLLMWrapper
+        from langchain_openai import AzureChatOpenAI
         
-        # gpt-5-mini 모델은 temperature 파라미터를 지원하지 않으므로 제거
-        # chat_model = AzureChatOpenAI(
-        #     azure_deployment=Settings.RAGAS_CHAT_MODEL,
-        #     api_version=Settings.API_VERSION,
-        #     azure_endpoint=Settings.API_BASE,
-        #     api_key=Settings.API_KEY,
-        #     # temperature 파라미터를 제거하여 모델의 기본값 사용
-        # )
-        chat_model = RagasAzureOpenAIWrapper(
+        class O4MiniCompatibleRagasWrapper(LangchainLLMWrapper):
+            """o4-mini 호환 RAGAS 래퍼"""
+            
+            def get_temperature(self, n: int) -> float:
+                """o4-mini 호환 temperature 반환 (항상 1.0)"""
+                return 1.0  # o4-mini는 temperature=1만 지원
+        
+        # 기본 AzureChatOpenAI 모델 생성
+        base_chat_model = AzureChatOpenAI(
             openai_api_version=Settings.API_VERSION,
             azure_endpoint=Settings.API_BASE,
             azure_deployment=Settings.RAGAS_CHAT_MODEL,
             model=Settings.RAGAS_CHAT_MODEL,
             validate_base_url=False,
-            max_retries=0, # 재시도 횟수를 0으로 설정 -> 에러 즉시 반환
+            max_retries=0,
+            temperature=1.0,  # o4-mini 지원값으로 명시적 설정
         )
-        # temperature=0.0, 1.0 이면 RAGAS 에서 에러남.
-
+        
+        # o4-mini 호환 RAGAS 래퍼로 감싸기
+        chat_model = O4MiniCompatibleRagasWrapper(
+            langchain_llm=base_chat_model,
+            run_config=None  # 기본 RunConfig 사용
+        )
+        
         # 2. Embedding Model (유사도 계산용)
-        # embed_client가 내부 설정에 따라 알아서 선택하도록 단순화
         embed_client = get_embedding_client()  # 기본값으로 알아서 결정
         embedding_model = embed_client.get_langchain_instance()
         
         print(f"[SUCCESS] RAGAS 모델 초기화 완료")
-        print(f"   - Chat Model: {Settings.RAGAS_CHAT_MODEL}")
+        print(f"   - Chat Model: {Settings.RAGAS_CHAT_MODEL} (o4-mini 호환 래퍼)")
         print(f"   - Embedding Model: {type(embedding_model)}")
         
         return chat_model, embedding_model
