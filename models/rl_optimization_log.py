@@ -46,6 +46,16 @@ class RlOptimizationLog(Base):
     constitution_status = Column(String(20), nullable=True, default='Pass')
     constitution_violation_reason = Column(Text, nullable=True)
     
+    # RAGAS 평가 점수들 (0.0 ~ 1.0 범위)
+    ragas_faithfulness_score = Column(Float, nullable=True)
+    ragas_answer_relevancy_score = Column(Float, nullable=True) 
+    ragas_context_precision_score = Column(Float, nullable=True)
+    ragas_context_recall_score = Column(Float, nullable=True)
+    
+    # RAGAS 종합 평가 결과 (컬럼 생성하지 않았음)
+    # ragas_is_faithful = Column(Boolean, nullable=True)
+    # ragas_is_relevant = Column(Boolean, nullable=True)
+    
     critical_review = Column(Text, nullable=True)
     full_analysis = Column(Text, nullable=True)
     

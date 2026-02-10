@@ -46,3 +46,17 @@ ALTER TABLE rl_optimization_logs ADD COLUMN constitution_status VARCHAR(20) DEFA
 ALTER TABLE rl_optimization_logs ADD COLUMN constitution_violation_reason TEXT;
 
 -- REAL 이란 PostgresSQL 의 부동소수점 타입 중 하나이다.
+
+-- 컬럼 추가: RAGAS 평가 점수들 (0.0 ~ 1.0 범위)
+ALTER TABLE rl_optimization_logs ADD COLUMN ragas_faithfulness_score REAL;
+ALTER TABLE rl_optimization_logs ADD COLUMN ragas_answer_relevancy_score REAL;
+ALTER TABLE rl_optimization_logs ADD COLUMN ragas_context_precision_score REAL;
+ALTER TABLE rl_optimization_logs ADD COLUMN ragas_context_recall_score REAL;
+
+-- RAGAS 점수 인덱스 추가 (성능 최적화)
+CREATE INDEX idx_rl_optimization_logs_ragas_faithfulness ON rl_optimization_logs(ragas_faithfulness_score);
+CREATE INDEX idx_rl_optimization_logs_ragas_answer_relevancy ON rl_optimization_logs(ragas_answer_relevancy_score);
+
+-- RAGAS 종합 평가 결과 컬럼 추가  :: 이건 일단 추가하지 않고, 프론트 단에서 분리해서 보여주려고 함 (임계값 기준은 변경해봐야하니까)
+-- ALTER TABLE rl_optimization_logs ADD COLUMN ragas_is_faithful BOOLEAN;
+-- ALTER TABLE rl_optimization_logs ADD COLUMN ragas_is_relevant BOOLEAN;
