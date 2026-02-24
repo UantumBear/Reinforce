@@ -159,11 +159,12 @@ class AppConfig:
         cls.API_BASE = cls.AZURE_OPENAI_ENDPOINT
         cls.API_VERSION = cls.AZURE_OPENAI_API_VERSION
         # cls.GENERATOR_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
-        cls.OPTIMIZER_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT        
+        cls.OPTIMIZER_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT         # cls.AZURE_GPT5_NANO_DEPLOYMENT  : 역할을 잘 이해하지 못함
         # 최적화 모델, 현재는 가장 싼 nano 를 쓰고 있지만, 전체 설계 완료 후에는 일반 모델로 변경하기
         cls.TESTER_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
         # Tester 모델, 해당 모델은 따로 제약을 걸 이유가 없음, 아무 모델이나 사용하기.
-        cls.RAGAS_CHAT_MODEL = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")  # RAGAS 평가자 모델
+        # cls.RAGAS_CHAT_MODEL = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")  # RAGAS 평가자 모델
+        cls.RAGAS_CHAT_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
         # RAGAS 평가자 모델은 gpt-5-mini, gpt-5-nano 를 지원하지 않음 (temperature 파라미터 문제)
         
         # 유효성 검사
