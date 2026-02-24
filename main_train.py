@@ -16,6 +16,7 @@
 # ----------------------------------------------------------------
 # 기본 라이브러리 import 
 import warnings
+from datetime import datetime
 from utils.log.console import print_step
 
 # Pydantic 관련 경고(UserWarning) 무시하기
@@ -43,6 +44,10 @@ from conf.config import Settings
 if __name__ == "__main__":
     print_step("=== DSPy RAG 모델 강화학습 기반 프롬프트 최적화 시작 ===")
 
+    # 학습용 experiment_id 생성
+    current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+    experiment_id = f"train_{current_time}"
+    
     print_step("0. [Settings] 설정 초기화")
     Settings.setup()
     
@@ -53,7 +58,7 @@ if __name__ == "__main__":
     
     print_step("2. 데이터 및 모델 준비")
     # 데이터 셋
-    trainset = load_dataset(sample_size=3, random_seed=42)
+    trainset = load_dataset(sample_size=2, random_seed=42, dataset_name="HJUNN/Finance-Law-merge-rag-dataset")
     if not trainset: exit()  # 데이터 로드 실패 시 종료
     # CleanLLM (TesterLLM) 모델 - RAG 기반 학생 모델 (에피소드 마다 매번 리셋되는 존재)
     student = RAG_CoT()
@@ -66,8 +71,9 @@ if __name__ == "__main__":
     optimizer = VerbalReinforceOptimizer(
         metric=hierarchical_feedback_metric,
         agent=agent,
-        max_episodes=5,
-        log_dir="datafile/results"
+        max_episodes=3,
+        log_dir="datafile/results",
+        experiment_id=experiment_id
     )
 
     print_step("4. [Execution] 최적화 실행")
