@@ -17,7 +17,9 @@ import textgrad as tg
 from utils.log.console import print_step
 
 from datafile.data_loader import load_dataset
-from infrastructure.llm_client import setup_lms
+from infrastructure.llm_client import get_textgrad_backward_engine, get_textgrad_forward_engine
+from metrics.judges.similarity_judge import SimilarityJudge
+from metrics.judges.ragas_failthfulness_judge import RagasFaithfulnessJudge
 from conf.config import Settings
 # 로그 저장을 위한 import (main_train.py 방식)
 from models.rl_optimization_log import RlOptimizationLog
@@ -112,14 +114,63 @@ def sanitize_for_azure_filter(value, max_chars: int) -> str:
     return text
 
 
+def has_jailbreak_like_pattern(text: str) -> bool:
+    """프롬프트 인젝션/탈옥으로 오인될 수 있는 패턴을 감지한다."""
+    normalized = (text or "").lower()
+    patterns = [
+        "ignore previous instructions",
+        "disregard all",
+        "you are now",
+        "developer mode",
+        "prompt injection",
+        "시스템 프롬프트를 무시",
+        "이전 지시를 무시",
+        "규칙을 무시",
+    ]
+    return any(pattern in normalized for pattern in patterns)
+
+
+def compact_textgrad_gradients(variable: tg.Variable, max_chars_per_gradient: int = 700) -> None:
+    """TextGrad 업데이트 프롬프트 길이를 줄이기 위해 gradient context를 제거/압축한다."""
+    for grad in list(variable.gradients):
+        compacted = sanitize_for_azure_filter(grad.value, max_chars=max_chars_per_gradient)
+        if has_jailbreak_like_pattern(compacted):
+            compacted = "답변의 정확성, 근거성, 간결성을 높이도록 프롬프트를 개선하세요."
+        grad.set_value(compacted)
+        variable.gradients_context[grad] = None
+
+
+def create_similarity_judge() -> SimilarityJudge | None:
+    """main_train.py와 동일한 임베딩 기반 유사도 평가기를 초기화한다."""
+    try:
+        return SimilarityJudge(use_azure=False)
+    except SystemExit:
+        print("[Warning] SimilarityJudge 초기화 실패(SystemExit). 유사도 점수는 0.0으로 기록됩니다.")
+        return None
+    except Exception as e:
+        print(f"[Warning] SimilarityJudge 초기화 실패: {e}. 유사도 점수는 0.0으로 기록됩니다.")
+        return None
+
+
+def create_ragas_judge() -> RagasFaithfulnessJudge | None:
+    """RAGAS 기반 Faithfulness/Relevancy 평가기를 초기화한다(평가 로그 전용)."""
+    try:
+        return RagasFaithfulnessJudge()
+    except SystemExit:
+        print("[Warning] RAGAS Judge 초기화 실패(SystemExit). RAGAS 점수는 None으로 기록됩니다.")
+        return None
+    except Exception as e:
+        print(f"[Warning] RAGAS Judge 초기화 실패: {e}. RAGAS 점수는 None으로 기록됩니다.")
+        return None
+
+
 def main():
     patch_textgrad_openai_compatibility()
 
     print_step("0. [Settings] 설정 초기화")
     Settings.setup()
     
-    print_step("1. [Infrastructure] LLM 연결 설정")
-    setup_lms()
+    print_step("1. [Infrastructure] TextGrad LLM 연결 설정")
     
     print_step("2. 데이터 로드")
     dataset_name = "didi0di/klue-mrc-ko-rag-cot"
@@ -134,16 +185,26 @@ def main():
     current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_id = f"textgrad_baseline_{current_time}"
     
-    # TextGrad 엔진 초기화 (현재 textgrad 버전 호환)
-    textgrad_model = Settings.AZURE_GPTO4_MINI_DEPLOYMENT or Settings.TESTER_MODEL
-    os.environ["AZURE_OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
-    os.environ["AZURE_OPENAI_API_BASE"] = Settings.AZURE_OPENAI_ENDPOINT or ""
-    os.environ["AZURE_OPENAI_API_VERSION"] = Settings.AZURE_OPENAI_API_VERSION or ""
-    os.environ["OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
-    engine = tg.get_engine(f"azure-{textgrad_model}")
-    tg.set_backward_engine(engine)
+    # TextGrad 엔진 초기화: Forward(전방 생성) / Backward(역전파 피드백) 분리
+    textgrad_forward_model = (
+        os.getenv("TEXTGRAD_FORWARD_ENGINE_MODEL")
+        or os.getenv("TEXTGRAD_TESTER_MODEL")
+        or Settings.TESTER_MODEL
+    )
+    textgrad_backward_model = (
+        os.getenv("TEXTGRAD_BACKWARD_ENGINE_MODEL")
+        or os.getenv("TEXTGRAD_TEACHER_MODEL")
+        or Settings.OPTIMIZER_MODEL
+    )
+
+    forward_engine = get_textgrad_forward_engine()
+    backward_engine = get_textgrad_backward_engine()
+    tg.set_backward_engine(backward_engine)
     
     print_step("4. TextGrad 최적화 실행")
+    similarity_judge = create_similarity_judge()
+    ragas_judge = create_ragas_judge()
+
     # 3. 최적화 대상 정의
     initial_prompt = "주어진 문맥을 바탕으로 질문에 친절하게 답해주세요."
     system_prompt = tg.Variable(
@@ -156,9 +217,9 @@ def main():
     # engine.generate()를 직접 호출하면 system_prompt와 계산 그래프가 연결되지 않아
     # get_gradient_text()가 비어 있을 수 있다.
     # 따라서 TextGrad 권장 방식인 BlackboxLLM(system_prompt=...)을 사용한다.
-    model = tg.BlackboxLLM(engine=engine, system_prompt=system_prompt)
+    model = tg.BlackboxLLM(engine=forward_engine, system_prompt=system_prompt)
 
-    optimizer = tg.TGD(parameters=list(model.parameters()), engine=engine)
+    optimizer = tg.TGD(parameters=list(model.parameters()), engine=backward_engine)
 
     # 4. 최적화 루프
     # [설계 의도]
@@ -177,9 +238,33 @@ def main():
         episode_log_start_idx = len(optimization_logs)
 
         for data in batch:
-            context = sanitize_for_azure_filter(data.get('context', ''), max_chars=2500)
+            context = sanitize_for_azure_filter(data.get('context', ''), max_chars=900)
             question = sanitize_for_azure_filter(data.get('question', ''), max_chars=500)
             ground_truth = sanitize_for_azure_filter(data.get('answer', ''), max_chars=800)
+
+            if has_jailbreak_like_pattern(context) or has_jailbreak_like_pattern(question) or has_jailbreak_like_pattern(ground_truth):
+                optimization_logs.append({
+                    'experiment_id': experiment_id,
+                    'episode': episode,
+                    'instruction': system_prompt.value,
+                    'question': question,
+                    'context': context,
+                    'model_answer': None,
+                    'gold_answer': ground_truth,
+                    'total_score': 0.0,
+                    'raw_similarity': 0.0,
+                    'ragas_faithfulness_score': None,
+                    'ragas_answer_relevancy_score': None,
+                    'answer_feedback': "[N/A] 잠재적 인젝션 패턴 포함 샘플",
+                    'prompt_feedback': "[N/A] 샘플 스킵",
+                    'is_success': False,
+                    'error_log': "[Skipped] potential jailbreak-like pattern in dataset sample",
+                    'optimizer_model_nm': textgrad_backward_model,
+                    'tester_model_nm': textgrad_forward_model,
+                    'created_at': datetime.now()
+                })
+                print(f"[Warning] Episode {episode} 샘플 스킵 - jailbreak 유사 패턴 감지")
+                continue
 
             try:
                 # 답변 생성 및 평가
@@ -203,6 +288,27 @@ def main():
                 computed_loss = loss(prediction_var)
                 losses.append(computed_loss)
 
+                raw_similarity = (
+                    similarity_judge(ground_truth, prediction)
+                    if similarity_judge is not None
+                    else 0.0
+                )
+
+                ragas_faithfulness_score = None
+                ragas_answer_relevancy_score = None
+                if ragas_judge is not None:
+                    try:
+                        ragas_result = ragas_judge.evaluate(
+                            question=question,
+                            answer=prediction,
+                            context=context,
+                            gold_answer=ground_truth,
+                        )
+                        ragas_faithfulness_score = ragas_result.get('score')
+                        ragas_answer_relevancy_score = ragas_result.get('relevancy_score')
+                    except Exception as ragas_error:
+                        print(f"[Warning] Episode {episode} RAGAS 평가 실패: {ragas_error}")
+
                 # DB 저장용 로그: episode 번호를 main_train.py 기준으로 기록
                 optimization_logs.append({
                     'experiment_id': experiment_id,
@@ -212,12 +318,16 @@ def main():
                     'context': context,
                     'model_answer': prediction,
                     'gold_answer': ground_truth,
+                    'total_score': raw_similarity,
+                    'raw_similarity': raw_similarity,
+                    'ragas_faithfulness_score': ragas_faithfulness_score,
+                    'ragas_answer_relevancy_score': ragas_answer_relevancy_score,
                     'answer_feedback': computed_loss.value,
                     'prompt_feedback': None,
                     'is_success': True,
                     'error_log': None,
-                    'optimizer_model_nm': textgrad_model,
-                    'tester_model_nm': textgrad_model,
+                    'optimizer_model_nm': textgrad_backward_model,
+                    'tester_model_nm': textgrad_forward_model,
                     'created_at': datetime.now()
                 })
             except Exception as sample_error:
@@ -235,16 +345,34 @@ def main():
                     'context': context,
                     'model_answer': None,
                     'gold_answer': ground_truth,
+                    'total_score': 0.0,
+                    'raw_similarity': 0.0,
+                    'ragas_faithfulness_score': None,
+                    'ragas_answer_relevancy_score': None,
                     'answer_feedback': "[N/A] 답변 평가 실패",
                     'prompt_feedback': "[N/A] 샘플 처리 실패",
                     'is_success': False,
                     'error_log': error_note,
-                    'optimizer_model_nm': textgrad_model,
-                    'tester_model_nm': textgrad_model,
+                    'optimizer_model_nm': textgrad_backward_model,
+                    'tester_model_nm': textgrad_forward_model,
                     'created_at': datetime.now()
                 })
                 print(f"[Warning] Episode {episode} 샘플 처리 실패 - {error_note}")
                 continue
+
+        successful_scores = [
+            log.get('total_score', 0.0)
+            for log in optimization_logs[episode_log_start_idx:]
+            if log.get('is_success')
+        ]
+        episode_avg_score = (
+            sum(successful_scores) / len(successful_scores)
+            if successful_scores
+            else 0.0
+        )
+        for idx in range(episode_log_start_idx, len(optimization_logs)):
+            optimization_logs[idx]['dataset_size'] = len(batch)
+            optimization_logs[idx]['avg_total_score'] = episode_avg_score
 
         # episode 종료 시점에 1회만 업데이트 (main_train.py의 episode 흐름과 유사)
         if not losses:
@@ -260,6 +388,8 @@ def main():
         try:
             total_loss.backward()
 
+            compact_textgrad_gradients(system_prompt)
+
             # TextGrad textual feedback: 최적화 대상(system_prompt)에 대한 gradient 텍스트
             # -> episode 단위 피드백이므로, 이번 episode의 모든 row에 동일하게 기록
             prompt_feedback_text = system_prompt.get_gradient_text().strip()
@@ -273,10 +403,29 @@ def main():
             optimizer.zero_grad()
 
             print(f"Episode {episode}/{episodes} 완료 (dataset_size={len(batch)}, update=1회)")
+            print(f"Backward engine model: {textgrad_backward_model} | Forward engine model: {textgrad_forward_model}")
             print(f"Current prompt: {system_prompt.value}")
 
         except Exception as e:
             root_error = extract_root_error_message(e)
+            if is_azure_content_filter_error(root_error):
+                fallback_prompt = (
+                    "주어진 문맥에서 확인 가능한 정보만 사용해 간결하고 사실적으로 답변하세요. "
+                    "근거가 부족하면 추측하지 말고 정보 부족을 명시하세요."
+                )
+                system_prompt.set_value(fallback_prompt)
+
+                for idx in range(episode_log_start_idx, len(optimization_logs)):
+                    optimization_logs[idx]['prompt_feedback'] = (
+                        "[Fallback Applied] Azure content filter로 optimizer.step 차단되어 "
+                        "안전한 기본 프롬프트로 대체함"
+                    )
+
+                optimizer.zero_grad()
+                print(f"[Warning] Episode {episode}/{episodes} 업데이트 필터 차단")
+                print("         - 안전한 fallback 프롬프트로 대체 후 다음 episode 진행")
+                continue
+
             episode_error = f"[TextGrad Backward/Update Error] {root_error}"
             for idx in range(episode_log_start_idx, len(optimization_logs)):
                 optimization_logs[idx]['prompt_feedback'] = "[N/A] Prompt feedback unavailable due to backward/update failure."
@@ -302,6 +451,12 @@ def main():
                 context=log_data['context'],
                 model_answer=log_data['model_answer'],
                 gold_answer=log_data['gold_answer'],
+                total_score=log_data.get('total_score'),
+                raw_similarity=log_data.get('raw_similarity'),
+                ragas_faithfulness_score=log_data.get('ragas_faithfulness_score'),
+                ragas_answer_relevancy_score=log_data.get('ragas_answer_relevancy_score'),
+                dataset_size=log_data.get('dataset_size'),
+                avg_total_score=log_data.get('avg_total_score'),
                 optimizer_model_nm=log_data['optimizer_model_nm'],
                 optimizer_model_provider="azure",
                 tester_model_nm=log_data['tester_model_nm'],
