@@ -227,6 +227,54 @@ def create_ragas_judge() -> RagasFaithfulnessJudge | None:
         print(f"[Warning] RAGAS Judge 초기화 실패: {e}. RAGAS 점수는 None으로 기록됩니다.")
         return None
 
+################### 차별점 ############################################################################
+## TextGrad Baseline 논문과 차별화된, 내가 설계한 계층적 피드백 구조로 프롬프트 개선 지시문을 생성하도록 추가한다. 
+
+def build_hierarchical_evaluation_instruction(ground_truth: str) -> str:
+    """답변 비평(TextLoss)을 계층형 rubric으로 구성한다."""
+    return (
+        f"[Ground Truth]\n{ground_truth}\n\n"
+        "[Layer 1: Fact Alignment]\n"
+        "- 정답 대비 사실 오류, 누락, 환각 가능성을 먼저 지적하세요.\n"
+        "[Layer 2: Context Grounding]\n"
+        "- 답변의 핵심 주장별로 문맥 근거 유무를 짚어주세요.\n"
+        "[Layer 3: Expression Quality]\n"
+        "- 간결성, 명확성, 논리 흐름 개선점을 제안하세요.\n"
+        "출력 형식: (1) 치명 오류 3개 이내 (2) 즉시 적용 가능한 개선 지시 3개"
+    )
+
+
+def build_hierarchical_prompt_feedback(gradient_text: str, episode_logs: list[dict]) -> str:
+    """프롬프트 업데이트용 피드백을 gradient + 샘플 비평으로 계층화한다."""
+    sample_feedbacks: list[str] = []
+    for row in episode_logs:
+        raw_feedback = row.get('answer_feedback')
+        if raw_feedback is None:
+            continue
+        normalized_feedback = normalize_text_field(raw_feedback).strip()
+        if normalized_feedback:
+            sample_feedbacks.append(normalized_feedback)
+        if len(sample_feedbacks) >= 5:
+            break
+
+    if not sample_feedbacks:
+        sample_feedback_block = "- [N/A] 유효한 샘플 비평이 없어 gradient 중심으로 업데이트"
+    else:
+        sample_feedback_block = "\n".join(f"- {item}" for item in sample_feedbacks)
+
+    cleaned_gradient = normalize_text_field(gradient_text).strip() or "[N/A] TextGrad prompt feedback is empty."
+    return (
+        "[Layer A: TextGrad Gradient]\n"
+        f"{cleaned_gradient}\n\n"
+        "[Layer B: Sample Critiques]\n"
+        f"{sample_feedback_block}\n\n"
+        "[Layer C: Prompt Rewrite Directives]\n"
+        "- 사실 정확도와 정답 일치도를 최우선으로 유지\n"
+        "- 문맥에 없는 추론은 금지하고 근거 부족 시 명시\n"
+        "- 불필요한 장황함을 줄이고 핵심 답변을 우선 제시"
+    )
+
+################################################################################################################
 
 def main():
     patch_textgrad_openai_compatibility()
@@ -245,9 +293,9 @@ def main():
         return
     
     print_step("3. TextGrad 환경 설정 및 엔진 초기화")
-    # TextGrad baseline용 experiment_id 생성
+    # TextGrad improve용 experiment_id 생성
     current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
-    experiment_id = f"textgrad_baseline_{current_time}"
+    experiment_id = f"textgrad_improve_{current_time}"
     
     # TextGrad 엔진 초기화: Forward(전방 생성) / Backward(역전파 피드백) 분리
     textgrad_forward_model = (
@@ -263,8 +311,6 @@ def main():
 
     forward_engine = get_textgrad_forward_engine()
     backward_engine = get_textgrad_backward_engine()
-    # backward_engine: TextGrad에서 "비평가/교사" 역할의 LLM 엔진.
-    # loss.backward() 시 생성된 피드백(gradient text)을 바탕으로 프롬프트를 어떻게 고칠지 판단할 때 사용된다.
     tg.set_backward_engine(backward_engine)
     
     print_step("4. TextGrad 최적화 실행")
@@ -303,7 +349,6 @@ def main():
     # optimizer(TGD): TextGrad의 텍스트 경사하강 업데이트기.
     # backward에서 나온 피드백을 입력으로 받아, 최적화 대상 변수(system_prompt.value)를 한 step씩 실제로 갱신한다.
     optimizer_system_prompt = get_tgd_optimizer_system_prompt(optimizer)
-
     # 4. 최적화 루프
     # [설계 의도]
     # - main_train.py와 용어를 맞추기 위해, 여기서는 "1 episode = train_dataset 전체 평가 + 1회 업데이트"로 정의한다.
@@ -312,7 +357,7 @@ def main():
     batch_size = len(train_dataset)  # episode 기반 설계에서는 전체 데이터셋을 한 번에 묶는다.
     optimization_logs = []  # DB 저장용 로그 버퍼
 
-    print(f"--- TextGrad Baseline Optimization 및 DB 저장 시작 ---")
+    print(f"--- TextGrad Improve Optimization 및 DB 저장 시작 ---")
 
     for episode in range(1, episodes + 1):
         # episode 기반 설계: batch는 항상 전체 train_dataset
@@ -374,11 +419,10 @@ def main():
                 prediction_var = model(query_var)
                 prediction = prediction_var.value
 
+                ############################### 차별점 ###############################################
                 # TextGrad의 평가 (Loss)
-                evaluation_instruction = (
-                    f"정답(Ground Truth): {ground_truth}\n"
-                    "모델 답변과의 차이점을 간결하게 비교하고, 개선점을 제안해주세요."
-                )
+                evaluation_instruction = build_hierarchical_evaluation_instruction(ground_truth)
+                ######################################################################################
                 loss = tg.TextLoss(evaluation_instruction)
                 computed_loss = loss(prediction_var)
                 losses.append(computed_loss)
@@ -392,7 +436,6 @@ def main():
                     evaluation_instruction=evaluation_instruction,
                     answer_feedback=computed_loss.value,
                 )
-
                 raw_similarity = None
                 if similarity_judge is not None:
                     try:
@@ -463,7 +506,6 @@ def main():
                     evaluation_instruction=None,
                     answer_feedback="[N/A] 답변 평가 실패",
                 )
-
                 optimization_logs.append({
                     'experiment_id': experiment_id,
                     'episode': episode,
@@ -528,17 +570,14 @@ def main():
 
             compact_textgrad_gradients(system_prompt)
 
-            # 실제 optimizer 입력은 backward 이후 생성되는 TGD update prompt다.
-            tgd_update_prompt = stringify_tgd_update_prompt(optimizer._update_prompt(system_prompt))
-            for idx in range(episode_log_start_idx, len(optimization_logs)):
-                optimization_logs[idx]['optimizer_system_prompt'] = optimizer_system_prompt
-                optimization_logs[idx]['optimizer_total_input'] = tgd_update_prompt
-
+            ##################################### 차별점 #############################################
             # TextGrad textual feedback: 최적화 대상(system_prompt)에 대한 gradient 텍스트
             # -> episode 단위 피드백이므로, 이번 episode의 모든 row에 동일하게 기록
-            prompt_feedback_text = system_prompt.get_gradient_text().strip()
-            if not prompt_feedback_text:
-                prompt_feedback_text = "[N/A] TextGrad prompt feedback is empty."
+            prompt_feedback_text = build_hierarchical_prompt_feedback(
+                gradient_text=system_prompt.get_gradient_text(),
+                episode_logs=optimization_logs[episode_log_start_idx:],
+            )
+            ##########################################################################################
 
             for idx in range(episode_log_start_idx, len(optimization_logs)):
                 optimization_logs[idx]['prompt_feedback'] = prompt_feedback_text
@@ -634,5 +673,5 @@ def main():
     print(f"Final optimized prompt: {system_prompt.value}")
 
 if __name__ == "__main__":
-    print_step("=== TextGrad Baseline 프롬프트 최적화 시작 ===")
+    print_step("=== TextGrad Improve 프롬프트 최적화 시작 ===")
     main()
