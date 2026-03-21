@@ -4,6 +4,7 @@
 """
 
 import dspy
+import os
 import sys
 from conf.config import Settings
 
@@ -68,6 +69,86 @@ def get_optimizer_llm():
     return optimizer_lm
 
 
+def get_textgrad_backward_engine():
+    """
+    TextGrad 논문 용어의 Backward Engine을 생성하여 반환.
+    - 기본값: Settings.OPTIMIZER_MODEL
+    - 오버라이드: Settings.TEXTGRAD_BACKWARD_ENGINE_MODEL
+    - 하위호환: TEXTGRAD_TEACHER_MODEL 환경변수
+    
+    Returns:
+        tuple: (engine, model_name) - TextGrad 엔진과 실제 사용된 모델명
+    """
+    import textgrad as tg
+
+    Settings.setup()
+
+    backward_engine_model = (
+        Settings.TEXTGRAD_BACKWARD_ENGINE_MODEL or Settings.OPTIMIZER_MODEL
+        # or os.getenv("TEXTGRAD_TEACHER_MODEL")
+    )
+    if not backward_engine_model:
+        raise ValueError("TEXTGRAD_BACKWARD_ENGINE_MODEL 또는 Settings.OPTIMIZER_MODEL이 필요합니다.")
+
+    print(f"[TextGrad Backward Engine] 사용 모델: {backward_engine_model}")
+
+    if Settings.USE_AZURE:
+        os.environ["AZURE_OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
+        os.environ["AZURE_OPENAI_API_BASE"] = Settings.AZURE_OPENAI_ENDPOINT or ""
+        os.environ["AZURE_OPENAI_API_VERSION"] = Settings.AZURE_OPENAI_API_VERSION or ""
+        os.environ["OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
+        engine = tg.get_engine(f"azure-{backward_engine_model}")
+    else:
+        engine = tg.get_engine(backward_engine_model)
+    
+    return engine, backward_engine_model
+
+
+def get_textgrad_forward_engine():
+    """
+    TextGrad 논문 용어의 Forward Engine을 생성하여 반환.
+    - 기본값: Settings.TESTER_MODEL
+    - 오버라이드: Settings.TEXTGRAD_FORWARD_ENGINE_MODEL
+    - 하위호환: TEXTGRAD_TESTER_MODEL 환경변수
+    
+    Returns:
+        tuple: (engine, model_name) - TextGrad 엔진과 실제 사용된 모델명
+    """
+    import textgrad as tg
+
+    Settings.setup()
+
+    forward_engine_model = (
+        Settings.TEXTGRAD_FORWARD_ENGINE_MODEL or Settings.TESTER_MODEL
+        # or os.getenv("TEXTGRAD_TESTER_MODEL")
+    )
+    if not forward_engine_model:
+        raise ValueError("TEXTGRAD_FORWARD_ENGINE_MODEL 또는 Settings.TESTER_MODEL이 필요합니다.")
+
+    print(f"[TextGrad Forward Engine] 사용 모델: {forward_engine_model}")
+
+    if Settings.USE_AZURE:
+        os.environ["AZURE_OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
+        os.environ["AZURE_OPENAI_API_BASE"] = Settings.AZURE_OPENAI_ENDPOINT or ""
+        os.environ["AZURE_OPENAI_API_VERSION"] = Settings.AZURE_OPENAI_API_VERSION or ""
+        os.environ["OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
+        engine = tg.get_engine(f"azure-{forward_engine_model}")
+    else:
+        engine = tg.get_engine(forward_engine_model)
+    
+    return engine, forward_engine_model
+
+
+def get_textgrad_teacher_llm():
+    """하위호환: get_textgrad_backward_engine() 사용 권장."""
+    return get_textgrad_backward_engine()
+
+
+def get_textgrad_tester_llm():
+    """하위호환: get_textgrad_forward_engine() 사용 권장."""
+    return get_textgrad_forward_engine()
+
+
 def get_ragas_model():
     """
     RAGAS 평가용 모델 반환
@@ -107,7 +188,7 @@ def get_ragas_model():
         embedding_model = embed_client.get_langchain_instance()
         
         print(f"[SUCCESS] RAGAS 모델 초기화 완료")
-        print(f"   - Chat Model: {Settings.RAGAS_CHAT_MODEL} (o4-mini 호환 래퍼)")
+        print(f"   - Chat Model: {Settings.RAGAS_CHAT_MODEL} (temperature Issue 호환 래퍼)")
         print(f"   - Embedding Model: {type(embedding_model)}")
         
         return chat_model, embedding_model
