@@ -33,10 +33,19 @@ class RlOptimizationLog(Base):
     # 실험 메타데이터
     dataset_size = Column(Integer, nullable=True)  # 실험에 사용된 데이터 개수
     avg_total_score = Column(Float, nullable=True)  # 해당 에피소드의 평균 점수
+
     optimizer_model_nm = Column(String(100), nullable=True)  # 최적화 담당 모델명 (예: gpt-5-nano)
     optimizer_model_provider = Column(String(50), nullable=True)  # 최적화 모델 제공사 (azure)
+
     tester_model_nm = Column(String(100), nullable=True)  # 테스팅 담당 모델명 (예: gpt-5-mini)
     tester_model_provider = Column(String(50), nullable=True)  # 테스팅 모델 제공사 (azure)
+
+    # RAGAS 평가자 모델 정보 추가
+    ragas_chat_model_nm = Column(String(100), nullable=True)  # RAGAS 평가자 모델명
+    ragas_chat_model_provider = Column(String(50), nullable=True)  # RAGAS 평가자 모델 제공사
+
+    # 임베딩 모델 정보 추가 (RAGAS 평가 시 사용)
+    embedding_model_nm = Column(String(100), nullable=True)  # 임베딩 모델
     
     # "Pass", "Fail" 문자열 저장을 위해 String 사용
     is_faithful = Column(String(20), nullable=True)
@@ -58,6 +67,10 @@ class RlOptimizationLog(Base):
     
     critical_review = Column(Text, nullable=True)
     full_analysis = Column(Text, nullable=True)
+    
+    # OptimizerLLM 관련 정보
+    optimizer_system_prompt = Column(Text, nullable=True)  # OptimizerLLM이 사용한 시스템 프롬프트
+    optimizer_total_input = Column(Text, nullable=True)    # OptimizerLLM에게 전달된 전체 입력 내용
     
     is_success = Column(Boolean, default=True)
     error_log = Column(Text, nullable=True)
