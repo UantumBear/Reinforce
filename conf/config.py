@@ -64,6 +64,10 @@ class AppConfig:
     GOOGLE_API_KEY = None
     # [EMBEDDING 모델 설정]
     LOCAL_EMBEDDING_MODEL_PATH = "model/embedding/ko-sroberta-multitask" # 이건 os 에서 읽지 않으므로 고정값으로 둠
+
+    # [TEXTGRAD BASELINE 설정]
+    TEXTGRAD_BACKWARD_ENGINE_MODEL = None
+    TEXTGRAD_FORWARD_ENGINE_MODEL = None
     
     # [Database Config] DB 관련 설정 추가
     DB_HOST = None
@@ -166,7 +170,12 @@ class AppConfig:
         # cls.RAGAS_CHAT_MODEL = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")  # RAGAS 평가자 모델
         cls.RAGAS_CHAT_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
         # RAGAS 평가자 모델은 gpt-5-mini, gpt-5-nano 를 지원하지 않음 (temperature 파라미터 문제)
-        
+
+
+        # TEXTGRAD_BASELINE 설정
+        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # TextGrad Backward Engine 모델 (예: gpt-4o-mini)
+        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # TextGrad Forward Engine 모델 (예: gpt-4o-mini)
+
         # 유효성 검사
         if not cls.API_KEY or not cls.API_BASE:
             logger.error("Azure 필수 설정(Key, Endpoint)이 누락되었습니다.")
