@@ -37,7 +37,7 @@ from conf.config import Settings
 # 1. 설정
 Settings.setup()
 client = get_azure_openai_client()
-MODEL = Settings.DATASET_GENERATOR_MODEL
+MODEL = Settings.DATASET_GENERATOR_MODEL # 최적화처럼 많이 도는 모델이 아니므로 가장 최신 모델로 설정
 
 # C-MAPSS 컬럼 정의
 COLUMNS = ['unit', 'cycle', 'os1', 'os2', 'os3'] + [f's{i}' for i in range(1, 22)]
@@ -128,7 +128,7 @@ def generate_gold_standards(test_data_path, rul_data_path, output_json_path, cou
             response = client.chat.completions.create(
                 model=MODEL,
                 messages=[
-                    {"role": "system", "content": TEACHER_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt_content}
                 ]
             )
@@ -154,7 +154,7 @@ def generate_gold_standards(test_data_path, rul_data_path, output_json_path, cou
     print(f"[SUCCESS] 저장 위치: {output_json_path}")
 
 if __name__ == "__main__":
-    DATA_PK = 'FD001'  # FD001, FD002, FD003, FD004 중 선택 가능 (현재는 FD001로 고정)
+    DATA_PK = 'FD004'  # FD001, FD002, FD003, FD004 중 선택 가능 (현재는 FD001로 고정)
     # NASA 데이터셋 경로
     TEST_DATA_PATH = PROJECT_ROOT / 'datafile' / 'raw' / 'nasa' / 'CMAPSSData' / f'test_{DATA_PK}.txt'
     RUL_DATA_PATH = PROJECT_ROOT / 'datafile' / 'raw' / 'nasa' / 'CMAPSSData' / f'RUL_{DATA_PK}.txt'
