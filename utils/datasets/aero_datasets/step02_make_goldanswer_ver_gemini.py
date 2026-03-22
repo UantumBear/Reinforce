@@ -1,0 +1,173 @@
+
+"""
+@경로: utils/datasets/aero_datasets/step02_make_goldanswer_ver_gemini.py
+@설명: C-MAPSS 데이터를 활용하여 'Code-based Facts' + 'LLM Narrative' 구조의 Gold Answer 생성
+- 피드백 반영: 수치적 근거(Facts)를 코드로 먼저 계산하고, 이를 기반으로 LLM이 보고서를 작성하게 함.
+- 데이터셋: NASA C-MAPSS FD001 (test_FD001.txt, RUL_FD001.txt)
+
+- textgrad 에서 사용할 Gold Answer 의 적절한 데이터셋을 만들기 위해 작성된 스크립트이다.
+- Nasa 에서 공식 터보 팬 엔진 데이터셋인 C-MAPSS의 FD001 버전을 다운받았다. 
+  해당 데이터를 기반으로 보고서 작성을 요청하여 Gold Answer를 생성한다.
+- textgrad 의 최적화 과정에서는 기본적인 QA 챗봇 데이터를 넣을 경우, 
+  기본 LLM 성능이 뛰어나서, 전혀 개선의 여지가 없게 된다. 때문에 
+  객관적인 수치를 기반으로 한 분석 보고서를 작성하여 Gold Answer 를 만든 후
+  TextGrad에서는 clean LLM 이 Data 와 Gold Answer 만 보고, 해당 보고서와 같은 형식의 답변을 내놓도록 최적화하는 형태로
+  실험을 진행하기 위해 작성하였다. 
+
+@실행방법:
+uv run python utils/datasets/aero_datasets/step02_make_goldanswer_ver_gemini.py
+
+"""
+
+import json
+import sys
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from tqdm import tqdm
+
+# 프로젝트 루트 설정 및 모듈 임포트
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from infrastructure.llm_client import get_azure_openai_client
+from conf.config import Settings
+
+# 1. 설정
+Settings.setup()
+client = get_azure_openai_client()
+MODEL = Settings.DATASET_GENERATOR_MODEL
+
+# C-MAPSS 컬럼 정의
+COLUMNS = ['unit', 'cycle', 'os1', 'os2', 'os3'] + [f's{i}' for i in range(1, 22)]
+
+def calculate_gold_facts(group, ground_truth_rul):
+    """
+    코드를 통해 객관적인 센서 데이터 분석 지표(Facts)를 생성합니다.
+    """
+    # 최근 30사이클 데이터 추출
+    recent_30 = group.tail(30)
+    first_cycle_data = group.iloc[0]
+    
+    # 분석 대상 핵심 센서 (보통 FD001에서 유의미한 변화를 보이는 센서들 선정)
+    key_sensors = ['s2', 's3', 's4', 's7', 's11', 's12', 's15']
+    
+    # 실제 데이터 길이 사용 (30개 미만일 수 있음)
+    n_cycles = len(recent_30)
+    
+    facts = {
+        "recent_avg": recent_30[key_sensors].mean().to_dict(),
+        "change_from_initial": (recent_30[key_sensors].mean() - first_cycle_data[key_sensors]).to_dict(),
+        "volatility": recent_30[key_sensors].std().to_dict(),
+        "trend_slope": {s: float(np.polyfit(range(n_cycles), recent_30[s], 1)[0]) for s in key_sensors},
+        "actual_rul": int(ground_truth_rul),
+        "status_label": "위험" if ground_truth_rul < 30 else "주의" if ground_truth_rul < 70 else "정상"
+    }
+    return facts
+
+# 2. 선생님 프롬프트 (피드백의 출력 형식을 강제함)
+TEACHER_SYSTEM_PROMPT = """
+당신은 항공 엔진 데이터 분석 전문가입니다. 
+제공되는 '코드 기반 분석 사실(Facts)'을 바탕으로 하급 정비사를 위한 표준 정비 보고서를 작성하세요.
+
+반드시 다음 형식을 엄격히 지켜서 답변하세요:
+
+** [Unit {id}] 엔진 상태 분석 보고서 **
+
+[상태 등급]
+- 1개 (정상/주의/위험 중 선택)
+
+[핵심 센서 요약]
+- 주요 센서 3개에 대한 수치적 변화 요약
+
+[이상 징후]
+- 데이터에서 발견된 구체적인 이상 현상 2개
+
+[점검 권고]
+- RUL 및 분석 결과를 바탕으로 한 구체적인 정비 권고 2개
+
+[근거 문장]
+- 이 진단의 근거가 되는 데이터 기반 문장 2개
+"""
+
+def generate_gold_standards(test_data_path, rul_data_path, output_json_path, count=10):
+    # 1. 데이터 로드
+    print("[INFO] C-MAPSS 데이터를 로드하고 분석 중...")
+    test_df = pd.read_csv(test_data_path, sep=r'\s+', header=None, names=COLUMNS)
+    rul_df = pd.read_csv(rul_data_path, sep=r'\s+', header=None, names=['rul'])
+    
+    gold_standard_results = []
+    unique_units = test_df['unit'].unique()[:count]
+
+    # 분석 대상 핵심 센서 정의 (calculate_gold_facts와 동일하게 유지)
+    key_sensors = ['s2', 's3', 's4', 's7', 's11', 's12', 's15']
+    
+    for i, unit_id in enumerate(tqdm(unique_units, desc="Gold Answer 생성 중")):
+        unit_data = test_df[test_df['unit'] == unit_id]
+        gt_rul = rul_df.iloc[i].values[0]
+        
+        # 데이터가 충분한지 확인
+        if len(unit_data) < 10:
+            print(f"[WARNING] Unit {unit_id}의 데이터가 부족합니다 ({len(unit_data)} cycles). 건너뜁니다.")
+            continue
+        
+        # 단계 1: 코드 기반 Facts 계산 (이게 핵심!)
+        facts = calculate_gold_facts(unit_data, gt_rul)
+        
+        # 입력용 원본 로그 (최근 30사이클, gold_facts와 동일한 센서 사용)
+        input_log_str = unit_data.tail(30)[['cycle'] + key_sensors].to_string(index=False)
+
+        try:
+            # 프롬프트의 {id} 부분을 실제 unit_id로 치환
+            system_prompt = TEACHER_SYSTEM_PROMPT.replace("{id}", str(unit_id))
+
+            # 단계 2: LLM을 활용한 Narrative 생성
+            prompt_content = f"분석용 Facts 데이터: {json.dumps(facts, indent=2)}\n\n입력 로그 샘플:\n{input_log_str}"
+            
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": TEACHER_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt_content}
+                ]
+            )
+
+            gold_narrative = response.choices[0].message.content
+
+            # 최종 데이터 구조화
+            gold_standard_results.append({
+                "id": int(unit_id),
+                "input_log": input_log_str, # LLM 모델이 보게 될 입력
+                "gold_facts": facts,        # TextGrad가 내부적으로 참조하거나 평가할 객관적 지표
+                "gold_standard_report": gold_narrative # LLM이 따라야 할 모범 답안 서술
+            })
+
+        except Exception as e:
+            print(f"[ERROR] Unit {unit_id} 생성 중 오류 발생: {e}")
+
+    # 결과 저장
+    with open(output_json_path, 'w', encoding='utf-8') as f:
+        json.dump(gold_standard_results, f, indent=4, ensure_ascii=False)
+    
+    print(f"\n[SUCCESS] 생성 완료! 총 {len(gold_standard_results)}개 생성됨")
+    print(f"[SUCCESS] 저장 위치: {output_json_path}")
+
+if __name__ == "__main__":
+    DATA_PK = 'FD001'  # FD001, FD002, FD003, FD004 중 선택 가능 (현재는 FD001로 고정)
+    # NASA 데이터셋 경로
+    TEST_DATA_PATH = PROJECT_ROOT / 'datafile' / 'raw' / 'nasa' / 'CMAPSSData' / f'test_{DATA_PK}.txt'
+    RUL_DATA_PATH = PROJECT_ROOT / 'datafile' / 'raw' / 'nasa' / 'CMAPSSData' / f'RUL_{DATA_PK}.txt'
+    OUTPUT_PATH = PROJECT_ROOT / 'datafile' / 'preprocess' / 'nasa' / f'gold_standard_dataset_ver_gemini_{DATA_PK}.json'
+    
+    # 폴더가 없으면 생성
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    generate_gold_standards(
+        str(TEST_DATA_PATH), 
+        str(RUL_DATA_PATH), 
+        str(OUTPUT_PATH), 
+        count=5 # 테스트용으로 5개만 생성
+    )
+
+    # uv run python utils/datasets/aero_datasets/step02_make_goldanswer_ver_gemini.py
