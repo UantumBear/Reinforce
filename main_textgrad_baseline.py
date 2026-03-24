@@ -18,14 +18,16 @@ NaN(계산 망가짐):
     RAGAS 평가가 실행됐지만 내부 Evaluation error/예외가 난 경우
     (유사도 호출에서 예외 발생 시도 NaN)
 """
+DEBUG_INDIVIDUAL_BACKWARD = False # 디버그 모드
 
 import os
-
+import re
 import math
 
 from datetime import datetime
 import textgrad as tg
 from textgrad.optimizer.optimizer import TextualGradientDescentwithMomentum
+from utils.environment.experiment import TextGradExperiment
 from utils.log.console import print_step
 
 from datafile.data_loader import load_dataset
@@ -39,53 +41,17 @@ from db.connection.pg_client import pg_client
 
 # 공통으로 사용 가능 한 utils 함수들
 from utils.llm_errors.error_parsers import extract_root_error_message
-from utils.llm_safety.azure_prompt_filters import has_jailbreak_like_pattern, sanitize_for_azure_filter
+from utils.llm_errors.error_debugger import debug_individual_backward_samples
+from utils.llm_safety.azure_prompt_filters import has_jailbreak_like_pattern
+from utils.text.normalization import normalize_text_field
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
+from utils.llm_patches.textgrad_info import get_tgd_optimizer_system_prompt, stringify_tgd_update_prompt
+
 
 # 기타 LLM get 함수들
 from metrics.judges.similarity_judge import create_similarity_judge 
 from metrics.judges.ragas_failthfulness_judge import create_ragas_judge
-
-
-
-
-def compact_textgrad_gradients(variable: tg.Variable, max_chars_per_gradient: int = 700) -> None:
-    """TextGrad 업데이트 프롬프트 길이를 줄이기 위해 gradient context를 제거/압축한다."""
-    for grad in list(variable.gradients):
-        compacted = sanitize_for_azure_filter(grad.value, max_chars=max_chars_per_gradient)
-        if has_jailbreak_like_pattern(compacted):
-            compacted = "답변의 정확성, 근거성, 간결성을 높이도록 프롬프트를 개선하세요."
-        grad.set_value(compacted)
-        variable.gradients_context[grad] = None
-
-
-def get_tgd_optimizer_system_prompt(optimizer) -> str:
-    """TGD optimizer 인스턴스가 실제 사용하는 시스템 프롬프트를 추출한다."""
-    for attr_name in ("optimizer_system_prompt", "system_prompt"):
-        prompt_value = getattr(optimizer, attr_name, None)
-        if isinstance(prompt_value, str) and prompt_value.strip():
-            return prompt_value
-    return "[N/A] Unable to capture TGD optimizer system prompt from optimizer instance."
-
-
-def stringify_tgd_update_prompt(prompt_value) -> str:
-    """TGD update prompt(str/list)를 로그 저장용 문자열로 변환한다."""
-    if prompt_value is None:
-        return "[N/A] TGD update prompt is unavailable."
-    if isinstance(prompt_value, str):
-        return prompt_value
-    if isinstance(prompt_value, list):
-        return "\n\n".join(str(item) for item in prompt_value)
-    return str(prompt_value)
-
-
-def capture_optimizer_update_prompt(optimizer, variable: tg.Variable, momentum_storage_idx: int = 0) -> str:
-    """optimizer 타입별 _update_prompt 시그니처를 맞춰 로그 문자열로 변환한다."""
-    if isinstance(optimizer, TextualGradientDescentwithMomentum):
-        prompt_value = optimizer._update_prompt(variable, momentum_storage_idx=momentum_storage_idx)
-    else:
-        prompt_value = optimizer._update_prompt(variable)
-    return stringify_tgd_update_prompt(prompt_value)
+from metrics.prompts.textgrad_baseline_prompts import build_azure_safe_optimizer_system_prompt
 
 
 def extract_momentum_history(optimizer, variable: tg.Variable, momentum_storage_idx: int = 0) -> str:
@@ -285,39 +251,17 @@ def create_error_log(
 
 
 def main():
-    patch_textgrad_openai_compatibility()
-    patch_textgrad_momentum_compatibility()
-
-    print_step("0. [Settings] 설정 초기화")
+    print_step("0. [Settings] TextGrad 실험 환경 설정")
+    # 패치를 명시적으로 먼저 적용
+    TextGradExperiment.apply_patches()  # ← 여기서만 실행
+    EXPERIMENT_INS = TextGradExperiment(mode='baseline')
+    
+    print_step("1. [Settings] 기본 백엔드 설정 초기화")
     Settings.setup()
     
-    print_step("1. [Infrastructure] TextGrad LLM 연결 설정")
-    
+
     print_step("2. 데이터 로드 및 Train/Validation 분할")
-    dataset_name = "didi0di/klue-mrc-ko-rag-cot"
-    
-    # TextGrad 논문: 총 데이터 로드 후 train/validation 분할
-    # - Train: 무작위 복원 추출용 풀 (충분히 큰 데이터셋)
-    # - Validation: 프롬프트 선택용 고정 세트
-    total_sample_size = int(os.getenv("TEXTGRAD_TOTAL_SAMPLES", "50"))  # Train pool용
-    validation_size = int(os.getenv("TEXTGRAD_VALIDATION_SIZE", "10"))
-    
-    full_dataset = load_dataset(dataset_name=dataset_name, sample_size=total_sample_size + validation_size)
-    
-    if not full_dataset:
-        print("[FAIL] 데이터 로드 실패")
-        return
-    
-    # Train/Validation 분할
-    import random
-    random.seed(42)  # 재현성
-    shuffled = full_dataset.copy()
-    random.shuffle(shuffled)
-    
-    train_pool = shuffled[:total_sample_size]  # 복원 추출용 풀
-    validation_dataset = shuffled[total_sample_size:total_sample_size + validation_size]
-    
-    print(f"[✓] Train pool: {len(train_pool)}개, Validation: {len(validation_dataset)}개")
+    dataset, train_pool, validation_dataset = EXPERIMENT_INS.load_and_split_data()
     
     print_step("3. TextGrad 환경 설정 및 엔진 초기화")
     # TextGrad baseline용 experiment_id 생성
@@ -350,7 +294,8 @@ def main():
 
     # 3. 최적화 대상 정의
     # role_descriptio은  [지금 고쳐야 할 대상(변수)의 정체] 를 말한다.
-    initial_prompt = "주어진 문맥을 바탕으로 질문에 친절하게 답해주세요."
+    # initial_prompt = "주어진 문맥을 바탕으로 질문에 친절하게 답해주세요."
+    initial_prompt = ""
     system_prompt = tg.Variable(
         initial_prompt, 
         requires_grad=True, 
@@ -375,10 +320,17 @@ def main():
     # )
 
     # 모멘텀 적용 옵티마이저 (논문 재현 경로)
+    # [Azure Content Filter 회피 전략]
+    # optimizer_system_prompt를 커스터마이징하여 건전한 최적화 가이드라인 제공
+
+    # TODO 아래 custom 프롬프트는 improve 실험 모드에서 사용할 것
+    # custom_optimizer_system_prompt = build_azure_safe_optimizer_system_prompt()
+    
     optimizer = TextualGradientDescentwithMomentum(
         parameters=list(model.parameters()),
         engine=backward_engine,
         momentum_window=momentum_window,
+        # optimizer_system_prompt=custom_optimizer_system_prompt,
     )
     # optimizer(TGD): TextGrad의 텍스트 경사하강 업데이트기.
     # backward에서 나온 피드백을 입력으로 받아, 최적화 대상 변수(system_prompt.value)를 한 step씩 실제로 갱신한다.
@@ -391,9 +343,9 @@ def main():
     # - 총 훈련 데이터 수: 36개 (3 × 12, 복원 추출)
     # - 매 iteration마다 validation으로 평가, 성능 향상 시에만 업데이트
     
-    episodes = int(os.getenv("TEXTGRAD_EPISODES", "3"))  # 논문에서는 보통 3~5 episodes # TODO 나중에 3으로 고칠 것 (논문재현)
+    episodes = int(os.getenv("TEXTGRAD_EPISODES", "2"))  # 논문에서는 보통 3~5 episodes # TODO 나중에 3으로 고칠 것 (논문재현)
     iterations_per_episode = int(os.getenv("TEXTGRAD_ITERATIONS_PER_EPISODE", "2"))  # TODO 원본 12
-    batch_size = int(os.getenv("TEXTGRAD_BATCH_SIZE", "3")) # TODO 원본 
+    batch_size = int(os.getenv("TEXTGRAD_BATCH_SIZE", "1")) # TODO 원본  
     
     optimization_logs = []  # DB 저장용 로그 버퍼
     # [TODO] 새로운 컬럼 필요 시 아래 주석 참고:
@@ -406,7 +358,6 @@ def main():
     print(f"--- TextGrad Baseline Optimization (논문 재현) 시작 ---")
     print(f"Episodes: {episodes}, Iterations/Episode: {iterations_per_episode}, Batch size: {batch_size}")
 
-   
 
     # ========== [TextGrad 논문 재현 루프 시작] ==========
     for episode in range(1, episodes + 1):
@@ -431,9 +382,9 @@ def main():
             
             # Train 샘플 처리
             for data in batch:
-                context = sanitize_for_azure_filter(data.get('context', ''), max_chars=900)
-                question = sanitize_for_azure_filter(data.get('question', ''), max_chars=500)
-                ground_truth = sanitize_for_azure_filter(data.get('answer', ''), max_chars=800)
+                context = normalize_text_field(data.get('context', ''))
+                question = normalize_text_field(data.get('question', ''))
+                ground_truth = normalize_text_field(data.get('answer', ''))
                 
                 if has_jailbreak_like_pattern(context) or has_jailbreak_like_pattern(question) or has_jailbreak_like_pattern(ground_truth):
                     # Jailbreak 패턴 감지 - 스킵
@@ -451,6 +402,9 @@ def main():
                     
                     # Gradient 생성 (TextGrad 논문 방식: 엄격한 페르소나 부여)
                     # 논문의 Solution Refinement 평가 프롬프트를 RAG 도메인에 맞게 수정
+                    # [정의] evaluation_instruction: 비평가 TeacherLLM(백워드엔진) 에게 건네는 채점 가이드 라인이다.
+                    # INFO:  비판 가이드라인 설정
+                    # TODO: 이건 되는데..
                     evaluation_instruction = (
                         "You are a critical and rigorous evaluator for RAG systems. "
                         "Your task is to examine the predicted answer step-by-step and identify potential flaws.\n\n"
@@ -462,8 +416,8 @@ def main():
                         "4. What specific improvements would make this answer better?\n\n"
                         "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
                     )
-                    loss = tg.TextLoss(evaluation_instruction)
-                    computed_loss = loss(prediction_var)
+                    loss = tg.TextLoss(evaluation_instruction) # (Teacher)에게 "이런 기준으로 채점해!"라고 지시.
+                    computed_loss = loss(prediction_var) # 학생(Tester)이 응답을 낸다. 
                     losses.append(computed_loss)
                     
                     # 점수 계산
@@ -471,6 +425,7 @@ def main():
                     if similarity_judge is not None:
                         try:
                             raw_similarity = similarity_judge(ground_truth, prediction)
+                            print(f"[Debug] Raw similarity score: {raw_similarity}")
                         except Exception:
                             raw_similarity = math.nan
                     
@@ -510,88 +465,237 @@ def main():
                 print(f"[Warning] Iteration {iteration}: 유효한 loss 없음, 업데이트 건너뜀")
                 continue
             
+            # ====================================== 디버깅 ====================================== #
+            # [디버깅] 개별 샘플별 Content Filter 테스트
+            if DEBUG_INDIVIDUAL_BACKWARD:
+                should_skip = debug_individual_backward_samples(
+                    losses=losses,
+                    episode=episode,
+                    iteration=iteration,
+                    optimizer=optimizer,
+                    extract_root_error_message_fn=extract_root_error_message
+                )
+                if should_skip:
+                    continue
+            # ====================================== 디버깅 ====================================== #
             
             # (Code Snippet 2) 논문 본문에 수록된 기본 프롬프트 최적화 코드
             # 논문의 핵심: tg.sum()으로 배치 손실 병합 후 backward
             # 이 과정에서 backward_engine(Teacher LLM)이 "어떻게 고쳐야 하는지"에 대한
             # 텍스트 기울기(Textual Gradient)를 생성합니다.
             total_loss = tg.sum(losses)
-            total_loss.backward()
-            
-            # [개선] Azure Content Filter 회피를 위한 gradient 압축
-            compact_textgrad_gradients(system_prompt)
+            # INFO [비평][STEP2] 비판 실행
+            total_loss.backward() # [중요] TeacherLLM 이 답과 모범답안을 비교해 비평(Gradient)을 쓴다.
             
             # 3) 후보 프롬프트 생성 (step() 전에!)
-            # optimizer._update_prompt()는 후보 프롬프트를 생성만 하고 적용하지 않음
-            tgd_update_prompt = capture_optimizer_update_prompt(optimizer, system_prompt, momentum_storage_idx=0)
-            momentum_history = extract_momentum_history(optimizer, system_prompt, momentum_storage_idx=0)
-            
-            # 후보 프롬프트 추출 (TODO: 이 부분은 TextGrad 내부 구조에 따라 조정 필요)
-            # 현재는 optimizer._update_prompt()의 결과를 파싱해서 <new_variable> 태그 추출
-            candidate_prompt = system_prompt.value  # 임시: 실제로는 파싱 필요
-            # [TODO] candidate_prompt 추출 로직 구현 필요
-            # TextGrad optimizer는 <new_variable>...</new_variable> 형태로 반환
-            # 이를 파싱하여 실제 후보 프롬프트 텍스트를 추출해야 함
-            
+            # 현재 gradient를 기반으로 optimizer 입력문을 만들고,
+            # backward_engine(optimizer LLM)을 실제로 한 번 호출해서
+            # <new_variable>...</new_variable> 형태의 후보 프롬프트를 생성한다.
+
+            # [중요] zero_grad() 전에 gradient 텍스트를 먼저 백업
+            # INFO [비평][STEP3] 비판 텍스트 추출
+            prompt_feedback_text = system_prompt.get_gradient_text().strip() or "[N/A]"
+
+            # optimizer가 실제로 받는 입력문 생성
+            if isinstance(optimizer, TextualGradientDescentwithMomentum):
+                update_prompt_value = optimizer._update_prompt(
+                    system_prompt,
+                    momentum_storage_idx=0,
+                )
+            else:
+                update_prompt_value = optimizer._update_prompt(system_prompt)
+
+            optimizer_update_input = stringify_tgd_update_prompt(update_prompt_value)
+            momentum_history = extract_momentum_history(
+                optimizer,
+                system_prompt,
+                momentum_storage_idx=0,
+            )
+
+            # 실제 optimizer LLM 호출
+            try:
+                optimizer_response = backward_engine(
+                    optimizer_update_input,
+                    system_prompt=optimizer_system_prompt,
+                )
+            except TypeError:
+                # 일부 엔진은 system_prompt 인자를 받지 않을 수 있으므로 fallback
+                merged_optimizer_input = (
+                    f"{optimizer_system_prompt}\n\n"
+                    f"{optimizer_update_input}"
+                )
+                optimizer_response = backward_engine(merged_optimizer_input)
+
+            optimizer_response_text = str(optimizer_response).strip()
+
+            # optimizer_total_input 로그용: 실제 입력 + 모멘텀 이력
+            optimizer_total_input_with_momentum = (
+                f"{optimizer_update_input}\n\n"
+                f"{'='*80}\n"
+                f"{momentum_history}"
+            )
+
+            # -----------------------------------------------------------------
+            # [디버깅] Optimizer 입력 / 응답 출력
+            print(f"\n{'='*80}")
+            print("[DEBUG] Optimizer 입력 프롬프트:")
+            print(f"{'='*80}")
+            print(optimizer_update_input)
+
+            print(f"\n{'='*80}")
+            print("[DEBUG] Optimizer가 생성한 전체 응답:")
+            print(f"{'='*80}")
+            print(optimizer_response_text)
+            print(f"\n{'='*80}\n")
+
+            # 여러 종류의 태그를 다 잡을 수 있게 정규표현식 보강
+            patterns = [
+                r"<new_variable>(.*?)</new_variable>",
+                r"<refined_template>(.*?)</refined_template>",
+                r"<OPTIMIZER_WRITING_TEXT_START>(.*?)<OPTIMIZER_WRITING_TEXT_END>",
+                r"```(.*?)```",
+            ]
+
+            actual_candidate_text = None
+            matched_pattern = None
+            pattern_results = []  # 각 패턴별 시도 결과 저장
+
+            for pattern in patterns:
+                match = re.search(pattern, optimizer_response_text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    candidate = match.group(1).strip()
+
+                    rejected_reason = []
+                    if not candidate:
+                        rejected_reason.append("빈 문자열")
+                    if "{" in candidate:
+                        rejected_reason.append("중괄호 포함")
+                    if "the improved variable" in candidate.lower():
+                        rejected_reason.append("placeholder 텍스트")
+
+                    if not rejected_reason:
+                        actual_candidate_text = candidate
+                        matched_pattern = pattern
+                        pattern_results.append(f"✅ {pattern}: 매칭 성공 & 사용됨")
+                        print(f"✅ 후보 프롬프트 추출 성공! (패턴: {pattern})")
+                        break
+                    else:
+                        pattern_results.append(
+                            f"⚠️ {pattern}: 매칭되었으나 거부됨 ({', '.join(rejected_reason)})"
+                        )
+                else:
+                    pattern_results.append(f"❌ {pattern}: 매칭 실패")
+
+            if not actual_candidate_text:
+                print(f"\n{'!'*80}")
+                print("⚠️ [경고] 후보 프롬프트 추출 실패!")
+                print(f"{'!'*80}")
+                print("\n[패턴별 매칭 시도 결과]")
+                for result in pattern_results:
+                    print(f"  {result}")
+                print("\n[원인 분석]")
+                print("  1. Optimizer LLM이 요구된 태그를 사용하지 않았거나")
+                print("  2. 매칭되었지만 placeholder 텍스트를 반환했습니다.")
+                print("\n[Optimizer 응답 앞부분 (디버깅용)]")
+                print("-" * 80)
+                print(optimizer_response_text[:500])
+                print("-" * 80)
+                print("\n→ 이번 iteration은 현재 프롬프트를 후보로 간주하고 비교를 계속합니다.\n")
+                actual_candidate_text = system_prompt.value
+
+            print(f"\n[추출된 후보 프롬프트]")
+            print(f"매칭 패턴: {matched_pattern or '[N/A]'}")
+            print(f"길이: {len(actual_candidate_text)} chars")
+            print(f"내용: {actual_candidate_text}...")
+            print(f"{'='*80}\n")
+            # -----------------------------------------------------------------
+
             # 4) Validation 평가
             val_score_current = 0.0
             val_score_candidate = 0.0
             val_count = 0
             
-            print(f"Validation 평가 중...")
+            print(f"Validation 평가 중 (현재 vs 후보 대결)...")
+            
+            # 현재 프롬프트 원본 백업
+            original_prompt_value = system_prompt.value # Forward 엔진의 시스템 프롬프트 값
+
             for val_data in validation_dataset:
-                val_context = sanitize_for_azure_filter(val_data.get('context', ''), max_chars=900)
-                val_question = sanitize_for_azure_filter(val_data.get('question', ''), max_chars=500)
-                val_ground_truth = sanitize_for_azure_filter(val_data.get('answer', ''), max_chars=800)
+                # 데이터 정제 및 입력 구성
+                val_context = normalize_text_field(val_data.get('context', ''))
+                val_question = normalize_text_field(val_data.get('question', ''))
+                val_gt = normalize_text_field(val_data.get('answer', ''))
+                val_inputs = f"Context: {val_context}\nQuestion: {val_question}"
                 
                 try:
-                    val_inputs = f"Context: {val_context}\nQuestion: {val_question}"
+                    # --- A. 현재(Current) 프롬프트 성능 측정 ---
+                    system_prompt.value = original_prompt_value
+                    # [수정] role_description을 반드시 포함해야 함
+                    val_var_curr = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
+                    pred_curr = model(val_var_curr).value
                     
-                    # 현재 프롬프트로 평가
-                    val_query_current = tg.Variable(val_inputs, role_description="Validation 입력", requires_grad=False)
-                    val_pred_current_var = model(val_query_current)
-                    val_pred_current = val_pred_current_var.value
+                    score_curr = similarity_judge(val_gt, pred_curr) if similarity_judge else 0
+                    val_score_current += score_curr
+
+                    # --- B. 후보(Candidate) 프롬프트 성능 측정 ---
+                    system_prompt.value = actual_candidate_text
+                    # [수정] role_description을 반드시 포함해야 함
+                    val_var_cand = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
+                    pred_cand = model(val_var_cand).value
                     
-                    if similarity_judge is not None:
-                        score_current = similarity_judge(val_ground_truth, val_pred_current)
-                        val_score_current += score_current
-                    
-                    # [TODO] 후보 프롬프트로 평가
-                    # 실제 구현에서는 일시적으로 system_prompt.value를 candidate_prompt로 변경하고
-                    # 평가 후 다시 복원해야 함
-                    # 지금은 placeholder로 현재와 동일 점수 사용
-                    val_score_candidate += score_current  # [TODO] 실제 후보 평가로 교체
+                    score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0
+                    val_score_candidate += score_cand
                     
                     val_count += 1
-                except Exception:
+                except Exception as e:
+                    print(f"Validation 샘플 에러: {e}")
                     continue
             
+            # [중요] 평가가 끝나면 반드시 시스템 프롬프트를 원래대로 복구
+            system_prompt.value = original_prompt_value
+
             if val_count > 0:
                 val_score_current /= val_count
                 val_score_candidate /= val_count
             
             # 5) 프롬프트 선택 및 업데이트
-            prompt_accepted = False
+            # TODO Textgrad 논문의 논리가 잘 반영된게 맞는지 확인해야 함..
+            # textgrad의 batch의 의도는 하나의 iteration 내에서 돌린 batch 중 best 를 뽑자는게 아니라! (중요)
+            # 여러개의 batch 를 검토하여 얻은 피드백을 모두 반영한 프롬프트를 만들고자 하는 것이다. 
+            # TextGrad 논문의 '배치 최적화(Batch Optimization)' 섹션
+            # 논문에서는 배치 내의 여러 데이터 인스턴스에서 전파된 기울기(피드백)들을 
+            # tg.sum()을 통해 하나로 이어 붙인(concatenated) 뒤 옵티마이저에 전달한다고 설명.
+            # 즉, 빔 서치처럼 여러 개의 프롬프트 후보군을 만들어 경쟁시키는 것이 아니라, 
+            # 옵티마이저가 여러 출처(다양한 문제)에서 온 다각적인 피드백을 한 번에 모두 확인하고 
+            # 단 1개의 종합적인 개선안을 만들도록 하는 것이 배치의 진짜 목적이다. 
+            # 그리고 아래 소스는, 아래와 같은 의도이다.
+            # 합쳐서 만든 새 프롬프트가 진짜 좋은지 한 번 더 검증해보고, 점수가 높을 때만 바꾸자!" (방어적/신중함)
+            # 논문의 실험 세팅을 보면, 매 반복(iteration)이 끝난 후 검증 데이터셋(validation set)을 돌려보고 
+            # 이전 프롬프트보다 성능이 향상되었을 때만 프롬프트를 업데이트(덮어쓰기) 한다고 나와있다. 
+            # 5) 프롬프트 선택 및 업데이트
             if val_score_candidate > val_score_current:
-                optimizer.step()  # 후보 채택
+                if hasattr(optimizer, "_update_momentum_storage"):
+                    optimizer._update_momentum_storage(system_prompt, momentum_storage_idx=0)
+
+                system_prompt.set_value(actual_candidate_text)
                 prompt_accepted = True
-                print(f"✅ Prompt accepted (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
+                print(f"✅ Prompt accepted & Updated (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
             else:
+                system_prompt.set_value(original_prompt_value)
+                prompt_accepted = False
                 print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f})")
-            
-            optimizer.zero_grad()
-            
+
             # 6) Iteration 로그 업데이트
-            prompt_feedback_text = system_prompt.get_gradient_text().strip() or "[N/A]"
-            optimizer_total_input_with_momentum = f"{tgd_update_prompt}\n\n{'='*80}\n{momentum_history}"
-            
             for idx in range(iteration_log_start_idx, len(optimization_logs)):
                 optimization_logs[idx]['prompt_feedback'] = prompt_feedback_text
                 optimization_logs[idx]['optimizer_total_input'] = optimizer_total_input_with_momentum
-                # optimization_logs[idx]['validation_score_current'] = val_score_current  # [TODO] 새 컬럼
-                # optimization_logs[idx]['validation_score_candidate'] = val_score_candidate  # [TODO] 새 컬럼
-                # optimization_logs[idx]['prompt_accepted'] = prompt_accepted  # [TODO] 새 컬럼
-        
+                # optimization_logs[idx]['validation_score_current'] = val_score_current
+                # optimization_logs[idx]['validation_score_candidate'] = val_score_candidate
+                # optimization_logs[idx]['prompt_accepted'] = prompt_accepted
+
+            # 마지막에 gradient 비우기
+            optimizer.zero_grad()
+                    
         # Episode 종료 후 평균 점수 계산
         successful_scores = []
         for log in optimization_logs[episode_log_start_idx:]:

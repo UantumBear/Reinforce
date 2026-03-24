@@ -9,6 +9,10 @@ datafile/practice/*
 datafile/results/*
 *.csv
 *.xlsx
+*.pptx
+*.jsonl
+*.zip
+*.tar.gz
 
 # git rm --cached *.csv
 # git commit -m "Stop tracking csv files"

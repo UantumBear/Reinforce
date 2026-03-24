@@ -69,6 +69,22 @@ def get_optimizer_llm():
     return optimizer_lm
 
 
+# ============================= TextGrad 실험 LLM =============================
+"""
+참고로, TextGrad 는 다양한 모델을 지원한다.
+    # OpenAI 직접 사용
+    engine = tg.get_engine("gpt-4o")
+
+    # Azure OpenAI 사용
+    engine = tg.get_engine("azure-gpt-4o")
+
+    # Anthropic Claude 사용  
+    engine = tg.get_engine("claude-3-opus")
+
+    # Google Gemini 사용
+    engine = tg.get_engine("gemini-pro")
+"""
+
 def get_textgrad_backward_engine():
     """
     TextGrad 논문 용어의 Backward Engine을 생성하여 반환.
@@ -196,3 +212,32 @@ def get_ragas_model():
     except Exception as e:
         print(f"[Error] RAGAS 모델 초기화 실패: {e}")
         return None, None
+
+
+# ========================= 일반 Azure OpenAI 클라이언트 =========================
+
+def get_azure_openai_client():
+    """
+    데이터셋 생성 등을 위한 간단한 Azure OpenAI 클라이언트 반환
+    
+    Returns:
+        AzureOpenAI: Azure OpenAI 클라이언트 인스턴스
+    """
+    from openai import AzureOpenAI
+    
+    Settings.setup()
+    
+    if not Settings.AZURE_OPENAI_API_KEY:
+        print("[FAIL] Azure API Key가 설정되지 않았습니다. .env 파일을 확인해주세요.")
+        sys.exit(1)
+    
+    client = AzureOpenAI(
+        api_key=Settings.AZURE_OPENAI_API_KEY,
+        api_version=Settings.API_VERSION,
+        azure_endpoint=Settings.API_BASE
+    )
+    
+    print(f"[SUCCESS] Azure OpenAI Client 초기화 완료")
+    print(f"   - Endpoint: {Settings.API_BASE}")
+    
+    return client

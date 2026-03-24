@@ -68,6 +68,9 @@ class AppConfig:
     # [TEXTGRAD BASELINE 설정]
     TEXTGRAD_BACKWARD_ENGINE_MODEL = None
     TEXTGRAD_FORWARD_ENGINE_MODEL = None
+
+    # [Dataset 생성용 모델 설정]
+    DATASET_GENERATOR_MODEL = None
     
     # [Database Config] DB 관련 설정 추가
     DB_HOST = None
@@ -175,6 +178,9 @@ class AppConfig:
         # TEXTGRAD_BASELINE 설정
         cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # TextGrad Backward Engine 모델 (예: gpt-4o-mini)
         cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # TextGrad Forward Engine 모델 (예: gpt-4o-mini)
+
+        # DATASET 생성용 모델 설정
+        cls.DATASET_GENERATOR_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # 데이터셋 생성용 모델 (예: gpt-5-mini)
 
         # 유효성 검사
         if not cls.API_KEY or not cls.API_BASE:
