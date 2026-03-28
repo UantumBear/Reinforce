@@ -7,7 +7,7 @@ from typing import Dict
 # from langchain_core.prompts import PromptTemplate # 단순한 문자열 프롬프트 템플릿
 from langchain_core.prompts import ChatPromptTemplate # 대화형 프롬프트 템플릿
 from langchain_core.output_parsers import StrOutputParser
-from conf.config import Env
+from conf.config import Settings
 from utils.models.model import ModelFactory
 
 
@@ -48,10 +48,11 @@ class OptimizationAgent:
             use_azure (bool): Azure 사용 여부
         """
 
+        Settings.setup()
         self.model_factory = ModelFactory()
         
         self.optimizer_llm = self.model_factory.get_llm(model_type="optimizer") # 재시도 기능 포함
-        self.use_azure = Env.USE_AZURE
+        self.use_azure = Settings.USE_AZURE
         self.version = version
         
         # 에이전트(Optimizer LLM)에게 어떤 행동을 할지 지시하는 프롬프트, 버전에 따라 내부에서 다르게 생성됨.
@@ -94,7 +95,7 @@ class OptimizationAgent:
             "worst_prompt": worst_prompt[:200],
             "worst_context": worst_case.get("context", "N/A")[:200],
             
-            # [Goal] 현재 목표
+            # [AnswerSheet] 현재 목표
             "current_question": state.get("question", ""),
             "reference_answer": state.get("reference_answer", "")[:100],
             
@@ -223,6 +224,7 @@ class OptimizationAgent:
              
 [최종 액션]
 위의 분석을 바탕으로 **질의응답 챗봇이 사용할 새로운 시스템 프롬프트**만 출력하세요.
+- 중복 제거 및 통합: 이전 프롬프트에 동일하거나 유사한 내용이 있다면 반드시 하나로 합치십시오. (예: '스타일' 관련 지시가 흩어져 있다면 '스타일' 섹션으로 모으기)
 - 설명이나 주석 없이 프롬프트 내용만
 - 챗봇이 모범답안과 유사한 답변을 생성하도록 명확히 유도
 - 실패 패턴을 방지하고 성공 패턴을 강화하는 방향으로
