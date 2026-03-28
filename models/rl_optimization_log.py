@@ -61,6 +61,9 @@ class RlOptimizationLog(Base):
     ragas_context_precision_score = Column(Float, nullable=True)
     ragas_context_recall_score = Column(Float, nullable=True)
     
+    # Accuracy 점수 (정확도, 0.0 ~ 1.0 범위)
+    accuracy = Column(Float, nullable=True) # Baseline 논문에서 Accuracy 라는 용어를 사용하여 비교 용도.
+    
     # RAGAS 종합 평가 결과 (컬럼 생성하지 않았음)
     # ragas_is_faithful = Column(Boolean, nullable=True)
     # ragas_is_relevant = Column(Boolean, nullable=True)
