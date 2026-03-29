@@ -17,13 +17,16 @@ def load_dataset(dataset_name=None, sample_size=None, random_seed=42, file_path=
     """
     데이터셋 이름을 기준으로 적절한 로더를 호출하여 DSPy Example 리스트로 반환합니다.
     
-    @param dataset_name: 데이터셋 이름 
+    @param dataset_name: 데이터셋 이름 (필수, None이거나 지원하지 않는 값이면 에러 발생)
         - "HJUNN/Finance-Law-merge-rag-dataset"
         - "didi0di/klue-mrc-ko-rag-cot"
         - "nasa/cmapss-fd001" ~ "nasa/cmapss-fd004"
+        - "openai/gsm8k"
     @param sample_size: 샘플링할 데이터 개수 (None이면 전체 사용)
     @param random_seed: 랜덤시드 (재현 가능한 실험을 위해 기본값 42)
-    @param file_path: 커스텀 파일 경로 (dataset_name보다 우선순위 낮음)
+    @param file_path: 커스텀 파일 경로 (dataset_name이 None일 때만 사용)
+    
+    @raises ValueError: dataset_name이 None이거나 지원하지 않는 값인 경우
     """
     
     # 1. dataset_name 기준으로 적절한 로더 호출
@@ -34,12 +37,26 @@ def load_dataset(dataset_name=None, sample_size=None, random_seed=42, file_path=
     elif dataset_name and dataset_name.startswith("nasa/cmapss"):
         # "nasa/cmapss-fd001", "nasa/cmapss-fd002", "nasa/cmapss-fd003", "nasa/cmapss-fd004"
         return load_nasa_cmapss_dataset(dataset_name, sample_size=sample_size, random_seed=random_seed)
+    elif dataset_name and dataset_name.startswith("openai/gsm8k"):
+        # "openai/gsm8k-main" (TextGrad 논문 재현용)
+        return load_gsm8k_dataset(sample_size=sample_size, random_seed=random_seed)
     
-    # 2. dataset_name이 없으면 file_path 기반으로 처리 (기존 호환성)
-    if file_path is None:
-        # 기본값: KLUE RAG 데이터셋
-        return load_klue_rag_dataset(sample_size=sample_size, random_seed=random_seed)
+    # 2. dataset_name이 없거나 매칭되지 않으면 에러 발생 (실험 재현성을 위해 명시적 지정 필수)
+    if dataset_name is None:
+        if file_path is None:
+            raise ValueError(
+                "dataset_name 또는 file_path를 지정해야 합니다. "
+                "사용 가능한 dataset_name: 'HJUNN/Finance-Law-merge-rag-dataset', 'didi0di/klue-mrc-ko-rag-cot', 'nasa/cmapss-fd001~fd004', 'openai/gsm8k'"
+            )
     else:
+        # dataset_name이 있지만 위에서 매칭되지 않은 경우
+        raise ValueError(
+            f"지원하지 않는 dataset_name: '{dataset_name}'. "
+            "사용 가능한 dataset_name: 'HJUNN/Finance-Law-merge-rag-dataset', 'didi0di/klue-mrc-ko-rag-cot', 'nasa/cmapss-fd001~fd004', 'openai/gsm8k'"
+        )
+    
+    # 3. file_path 기반 처리 (dataset_name이 None이고 file_path가 있는 경우만)
+    if file_path is not None:
         # 경로가 문자열이면 Path 객체로 변환
         if isinstance(file_path, str):
             file_path = Path(file_path)
@@ -109,6 +126,75 @@ def load_finance_law_dataset(sample_size=None, random_seed=42):
         dataset.append(example)
 
     print(f"[Data Loader] Finance Law 데이터셋 변환 완료: {len(dataset)}개 예제")
+    
+    # 재현 가능한 셔플 (Train/Validation 분할을 위해)
+    random.seed(random_seed)
+    random.shuffle(dataset)
+    print(f"[Data Loader] 랜덤시드 {random_seed}로 데이터셋 셔플 완료")
+    
+    return dataset
+
+
+def load_gsm8k_dataset(sample_size=None, random_seed=42):
+    """
+    GSM8k (Grade School Math 8K) 데이터셋을 로드합니다.
+    TextGrad 논문 재현용.
+    
+    @데이터셋 구조:
+        - question: 수학 문제 (영어)
+        - answer: 정답 ("#### 숫자" 형식 포함)
+        - context 컬럼 없음 (GSM8k는 문제 자체가 전부)
+    
+    @매핑:
+        - question: 그대로 사용
+        - context: 빈 문자열 (GSM8k는 context가 없음)
+        - answer: 정답
+    
+    @참고:
+        - train.csv: 학습용 데이터 (프롬프트 최적화에 사용)
+        - test.csv: 평가용 데이터 (최종 성능 측정에 사용)
+        - 이 함수는 train.csv를 로드하여 experiment.py에서 train/validation 분리
+    """
+    file_path = BASE_DIR / "datafile/original/openai/gsm8k/main/train.csv"
+    
+    # 파일 존재 확인
+    if not os.path.exists(file_path):
+        print(f"[Warning] GSM8k 데이터셋을 찾을 수 없습니다: {file_path}")
+        return _get_hardcoded_examples()
+    
+    try:
+        df = pd.read_csv(file_path)
+        print(f"[Data Loader] GSM8k 데이터셋 로드 완료. 총 {len(df)}개 행.")
+        print(f"[CHECK] CSV 컬럼 목록: {df.columns.tolist()}")
+
+    except Exception as e:
+        print(f"[Error] GSM8k 데이터셋 로드 실패: {e}")
+        return _get_hardcoded_examples()
+
+    # 데이터 샘플링
+    if sample_size:
+        df = df.sample(n=min(sample_size, len(df)), random_state=random_seed)
+        df = df.reset_index(drop=True)
+        print(f"[Data Loader] 랜덤시드 {random_seed}로 {len(df)}개 샘플 추출")
+
+    # DSPy Example 변환 (GSM8k 전용 로직)
+    dataset = []
+    
+    for idx, row in df.iterrows():
+        # 필수 데이터 검증
+        if pd.isna(row.get('question')) or pd.isna(row.get('answer')):
+            continue
+
+        # GSM8k는 context가 없음 (수학 문제 자체가 전부)
+        example = dspy.Example(
+            question=row['question'],
+            context='',  # GSM8k는 context 없음
+            answer=row['answer']
+        ).with_inputs("question", "context")
+        
+        dataset.append(example)
+
+    print(f"[Data Loader] GSM8k 데이터셋 변환 완료: {len(dataset)}개 예제")
     
     # 재현 가능한 셔플 (Train/Validation 분할을 위해)
     random.seed(random_seed)
@@ -357,9 +443,14 @@ def _load_csv_dataset(file_path, sample_size=None, random_seed=42):
         if pd.isna(row.get('question')) or pd.isna(row.get('answer')):
             continue
 
+        # search_result 컬럼이 없을 수 있으므로 안전하게 처리
+        context = row.get('search_result', row.get('context', ''))
+        if pd.isna(context):
+            context = ''
+
         example = dspy.Example(
             question=row['question'],
-            context=row['search_result'],
+            context=context,
             answer=row['answer']
         ).with_inputs("question", "context")
         
