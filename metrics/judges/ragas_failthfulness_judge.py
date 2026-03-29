@@ -90,3 +90,16 @@ class RagasFaithfulnessJudge:
     def __call__(self, question: str, answer: str, context: Union[str, List[str]], gold_answer: Optional[str] = None) -> dict:
         """호출 가능 인터페이스"""
         return self.evaluate(question, answer, context, gold_answer)
+    
+
+
+def create_ragas_judge() -> RagasFaithfulnessJudge | None:
+    """RAGAS 기반 Faithfulness/Relevancy 평가기를 초기화한다(평가 로그 전용)."""
+    try:
+        return RagasFaithfulnessJudge()
+    except SystemExit:
+        print("[Warning] RAGAS Judge 초기화 실패(SystemExit). RAGAS 점수는 None으로 기록됩니다.")
+        return None
+    except Exception as e:
+        print(f"[Warning] RAGAS Judge 초기화 실패: {e}. RAGAS 점수는 None으로 기록됩니다.")
+        return None
