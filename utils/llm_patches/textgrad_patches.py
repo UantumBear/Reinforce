@@ -1,11 +1,15 @@
 """
 @경로 utils/llm_patches/textgrad_patches.py
-@설명 TextGrad 라이브러리의 OpenAI API 호환성 문제를 해결하는 몽키 패치
+@설명 TextGrad 라이브러리의 OpenAI API 호환성 문제(ERROR)를 해결하는 몽키 패치
 - textgrad==0.1.8 기준으로 작성 됨.
 """
 import inspect
 import textgrad as tg
-from textgrad.optimizer.optimizer import TextualGradientDescentwithMomentum, construct_tgd_prompt
+from textgrad.optimizer.optimizer import (
+    TextualGradientDescentwithMomentum, 
+    construct_tgd_prompt,
+    get_gradient_and_context_text
+)
 
 
 def patch_textgrad_openai_compatibility():
@@ -89,9 +93,23 @@ def patch_textgrad_openai_compatibility():
     ChatOpenAI._generate_from_single_prompt = _patched_generate_from_single_prompt
 
 def patch_textgrad_momentum_compatibility():
-    """textgrad==0.1.8 momentum optimizer의 _update_prompt 반환 누락을 보완한다."""
+    """
+    textgrad==0.1.8 momentum optimizer의 두 가지 버그를 보완한다:
+    1. _update_prompt 반환 누락
+    2. gradient context (<CONVERSATION> 태그) 누락
+    
+    @문제상황:
+    - TextualGradientDescentwithMomentum._update_prompt이 variable.get_gradient_text() 사용
+    - 이것은 순수 gradient 텍스트만 반환하고, conversation context를 포함하지 않음
+    - 일반 TGD는 get_gradient_and_context_text(variable)를 사용하여 <CONVERSATION> 태그 포함
+    
+    @해결방법:
+    - get_gradient_and_context_text(variable)를 사용하도록 패치
+    - optimizer에게 전달되는 전체 context에 <CONVERSATION> 태그 포함
+    """
     source = inspect.getsource(TextualGradientDescentwithMomentum._update_prompt)
-    if "return prompt" in source:
+    if "return prompt" in source and "get_gradient_and_context_text" in source:
+        # 이미 패치가 적용되었고 gradient context도 포함됨
         return
 
     def _patched_update_prompt(self, variable: tg.Variable, momentum_storage_idx: int):
@@ -103,7 +121,8 @@ def patch_textgrad_momentum_compatibility():
         optimizer_information = {
             "variable_desc": variable.get_role_description(),
             "variable_value": variable.value,
-            "variable_grad": variable.get_gradient_text(),
+            # ✅ 수정: gradient context (<CONVERSATION> 태그) 포함
+            "variable_grad": get_gradient_and_context_text(variable),
             "variable_short": variable.get_short_value(),
             "constraint_text": self.constraint_text,
             "past_values": past_values,
