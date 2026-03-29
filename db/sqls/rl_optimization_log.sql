@@ -22,8 +22,15 @@ CREATE TABLE rl_optimization_logs (
     is_success BOOLEAN DEFAULT TRUE,
     error_log TEXT,
     
+    optimizer_system_prompt TEXT,
+    optimizer_total_input TEXT,
+    
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 새로운 컬럼 추가를 위한 ALTER 문들
+ALTER TABLE rl_optimization_logs ADD COLUMN IF NOT EXISTS optimizer_system_prompt TEXT;
+ALTER TABLE rl_optimization_logs ADD COLUMN IF NOT EXISTS optimizer_total_input TEXT;
 
 -- 성능 최적화를 위한 인덱스 생성
 CREATE INDEX idx_rl_optimization_logs_experiment_id ON rl_optimization_logs(experiment_id);
@@ -41,6 +48,13 @@ ALTER TABLE rl_optimization_logs ADD COLUMN optimizer_model_provider VARCHAR(50)
 ALTER TABLE rl_optimization_logs ADD COLUMN tester_model_nm VARCHAR(100);
 ALTER TABLE rl_optimization_logs ADD COLUMN tester_model_provider VARCHAR(50);
 
+ALTER TABLE rl_optimization_logs ADD COLUMN ragas_chat_model_nm VARCHAR(100);
+ALTER TABLE rl_optimization_logs ADD COLUMN ragas_chat_model_provider VARCHAR(50);
+
+-- 모든 임베딩 모델은 하나로 통일
+ALTER TABLE rl_optimization_logs ADD COLUMN embedding_model_nm VARCHAR(100);       
+ALTER TABLE rl_optimization_logs ADD COLUMN embedding_model_provider VARCHAR(50); 
+
 -- 컬럼 추가: 헌법(Constitution) 위반 여부
 ALTER TABLE rl_optimization_logs ADD COLUMN constitution_status VARCHAR(20) DEFAULT 'Pass';
 ALTER TABLE rl_optimization_logs ADD COLUMN constitution_violation_reason TEXT;
@@ -56,6 +70,9 @@ ALTER TABLE rl_optimization_logs ADD COLUMN ragas_context_recall_score REAL;
 -- RAGAS 점수 인덱스 추가 (성능 최적화)
 CREATE INDEX idx_rl_optimization_logs_ragas_faithfulness ON rl_optimization_logs(ragas_faithfulness_score);
 CREATE INDEX idx_rl_optimization_logs_ragas_answer_relevancy ON rl_optimization_logs(ragas_answer_relevancy_score);
+
+-- 컬럼 추가: Accuracy 점수 (정확도, 0.0 ~ 1.0 범위)
+ALTER TABLE rl_optimization_logs ADD COLUMN accuracy REAL; -- REAL 은 부동소수점 타입
 
 -- RAGAS 종합 평가 결과 컬럼 추가  :: 이건 일단 추가하지 않고, 프론트 단에서 분리해서 보여주려고 함 (임계값 기준은 변경해봐야하니까)
 -- ALTER TABLE rl_optimization_logs ADD COLUMN ragas_is_faithful BOOLEAN;
