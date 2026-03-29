@@ -66,30 +66,73 @@ def calculate_gold_facts(group, ground_truth_rul):
     }
     return facts
 
-# 2. 선생님 프롬프트 (피드백의 출력 형식을 강제함)
 TEACHER_SYSTEM_PROMPT = """
 당신은 항공 엔진 데이터 분석 전문가입니다. 
-제공되는 '코드 기반 분석 사실(Facts)'을 바탕으로 하급 정비사를 위한 표준 정비 보고서를 작성하세요.
+제공되는 분석 사실(Facts)을 바탕으로 정비사를 위한 **가독성이 뛰어난 마크다운(Markdown) 보고서**를 작성하세요.
 
-반드시 다음 형식을 엄격히 지켜서 답변하세요:
+### [작성 규칙]
+1. 모든 섹션 제목은 `###` 헤더를 사용하세요.
+2. 각 섹션 사이에는 반드시 **빈 줄(Double Newline)**을 추가하여 가독성을 높이세요.
+3. 수치나 상태 정보는 `**`를 사용하여 **굵게** 표시하세요.
+4. 모든 리스트 항목은 `-` 불렛 포인트를 사용하세요.
 
-** [Unit {id}] 엔진 상태 분석 보고서 **
+---
 
-[상태 등급]
-- 1개 (정상/주의/위험 중 선택)
+### ** [Unit {id}] 엔진 상태 분석 보고서 **
 
-[핵심 센서 요약]
-- 주요 센서 3개에 대한 수치적 변화 요약
+### [상태 등급]
+- **{status_label}** (정상/주의/위험 중 하나)
 
-[이상 징후]
-- 데이터에서 발견된 구체적인 이상 현상 2개
+### [핵심 센서 요약]
+- **s4**: 최근 평균 **{avg}**, 초기 대비 **{diff}**, 추세 기울기 **{slope}** 등 요약 (3개 센서)
 
-[점검 권고]
-- RUL 및 분석 결과를 바탕으로 한 구체적인 정비 권고 2개
+### [이상 징후]
+- 발견된 이상 현상을 구체적으로 서술하세요. (섹션 간 줄바꿈 필수)
 
-[근거 문장]
-- 이 진단의 근거가 되는 데이터 기반 문장 2개
+### [점검 권고]
+- **RUL {actual_rul}** 기반의 구체적인 권고안 2개
+
+### [근거 문장]
+- 수치 데이터가 포함된 근거 문장 2개
 """
+
+TEACHER_SYSTEM_PROMPT_V2 = """
+당신은 항공 엔진 데이터 분석 전문가입니다. 
+제공되는 분석 사실(Facts)을 바탕으로 정비사를 위한 **가독성이 극대화된 마크다운 보고서**를 작성하세요.
+
+### [가독성 필수 규칙 - 미준수 시 정비 오류 발생 위험]
+1. **섹션 구분**: 각 대주제(###) 사이에는 반드시 **빈 줄을 2줄(Double Newline)** 삽입하세요.
+2. **리스트**: 모든 리스트 항목(-) 앞뒤에는 줄바꿈을 넣어 항목이 섞이지 않게 하세요.
+3. **강조**: 핵심 수치와 상태 등급은 반드시 `**텍스트**` 형식을 사용하여 굵게 표시하세요.
+4. **절대 금기**: 모든 내용을 한 줄로 이어 쓰지 마세요. 가독성이 낮으면 즉시 탈락입니다.
+
+---
+
+### [보고서 출력 템플릿 (이 양식을 복사해서 채우세요)]
+
+## ** [Unit {id}] 엔진 상태 분석 보고서 **
+
+### [상태 등급]
+- **{status_label}**
+
+### [핵심 센서 요약]
+- **s4**: 최근 평균 **{avg_s4}**, 초기 대비 **{diff_s4}**, 추세 기울기 **{slope_s4}**
+- **s11**: 최근 평균 **{avg_s11}**, 초기 대비 **{diff_s11}**, 추세 기울기 **{slope_s11}**
+- **s12**: 최근 평균 **{avg_s12}**, 초기 대비 **{diff_s12}**, 추세 기울기 **{slope_s12}**
+
+### [이상 징후]
+- (첫 번째 이상 현상 상세 설명)
+- (두 번째 이상 현상 상세 설명)
+
+### [점검 권고]
+- **RUL {actual_rul}** 기반 권고안 1
+- 권고안 2
+
+### [근거 문장]
+- (수치가 포함된 근거 문장 1)
+- (수치가 포함된 근거 문장 2)
+"""
+
 
 def generate_gold_standards(test_data_path, rul_data_path, output_json_path, count=10):
     # 1. 데이터 로드
@@ -120,7 +163,7 @@ def generate_gold_standards(test_data_path, rul_data_path, output_json_path, cou
 
         try:
             # 프롬프트의 {id} 부분을 실제 unit_id로 치환
-            system_prompt = TEACHER_SYSTEM_PROMPT.replace("{id}", str(unit_id))
+            system_prompt = TEACHER_SYSTEM_PROMPT_V2.replace("{id}", str(unit_id))
 
             # 단계 2: LLM을 활용한 Narrative 생성
             prompt_content = f"분석용 Facts 데이터: {json.dumps(facts, indent=2)}\n\n입력 로그 샘플:\n{input_log_str}"
@@ -154,11 +197,12 @@ def generate_gold_standards(test_data_path, rul_data_path, output_json_path, cou
     print(f"[SUCCESS] 저장 위치: {output_json_path}")
 
 if __name__ == "__main__":
-    DATA_PK = 'FD004'  # FD001, FD002, FD003, FD004 중 선택 가능 (현재는 FD001로 고정)
+    DATA_PK = 'FD001'  # FD001, FD002, FD003, FD004 중 선택 가능 (현재는 FD001로 고정)
+    COUNT_NUM = 30
     # NASA 데이터셋 경로
     TEST_DATA_PATH = PROJECT_ROOT / 'datafile' / 'raw' / 'nasa' / 'CMAPSSData' / f'test_{DATA_PK}.txt'
     RUL_DATA_PATH = PROJECT_ROOT / 'datafile' / 'raw' / 'nasa' / 'CMAPSSData' / f'RUL_{DATA_PK}.txt'
-    OUTPUT_PATH = PROJECT_ROOT / 'datafile' / 'preprocess' / 'nasa' / f'gold_standard_dataset_ver_gemini_{DATA_PK}.json'
+    OUTPUT_PATH = PROJECT_ROOT / 'datafile' / 'preprocess' / 'nasa' / f'gold_standard_dataset_ver_gemini_{DATA_PK}_cnt_{COUNT_NUM}_v2.json'
     
     # 폴더가 없으면 생성
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -167,7 +211,7 @@ if __name__ == "__main__":
         str(TEST_DATA_PATH), 
         str(RUL_DATA_PATH), 
         str(OUTPUT_PATH), 
-        count=5 # 테스트용으로 5개만 생성
+        count=COUNT_NUM # 테스트용으로 5개만 생성
     )
 
     # uv run python utils/datasets/aero_datasets/step02_make_goldanswer_ver_gemini.py
