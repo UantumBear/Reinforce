@@ -32,3 +32,17 @@ class SimilarityJudge:
         except Exception as e:
             print(f"[WARNING] 임베딩 유사도 계산 실패: {e}")
             return 0.0
+        
+
+def create_similarity_judge() -> SimilarityJudge | None:
+    """
+        main_train.py와 동일한 임베딩 기반 유사도 평가기를 초기화한다. 
+    """
+    try:
+        return SimilarityJudge(use_azure=False)
+    except SystemExit:
+        print("[Warning] SimilarityJudge 초기화 실패(SystemExit). 유사도 점수는 None(NULL)으로 기록됩니다.")
+        return None
+    except Exception as e:
+        print(f"[Warning] SimilarityJudge 초기화 실패: {e}. 유사도 점수는 None(NULL)으로 기록됩니다.")
+        return None
