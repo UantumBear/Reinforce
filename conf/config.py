@@ -34,7 +34,13 @@ class AppConfig:
     LOG_DIR = PROJECT_ROOT / "logs"
 
     # [공통 설정]
+    # USE_AZURE: DSPy, RAGAS 등 기존 시스템이 사용할 Provider (Azure vs Google)
     USE_AZURE = None
+    
+    # TEXTGRAD_PROVIDER: TextGrad 실험 전용 Provider (openai/azure/google)
+    # - USE_AZURE와 독립적으로 동작 (예: DSPy는 Azure, TextGrad는 OpenAI 가능)
+    # - openai: 일반 OpenAI API, azure: Azure OpenAI, google: Google Gemini
+    TEXTGRAD_PROVIDER = None
 
     # [현재 활성화된 모델 정보 (Agent는 이것만 참조하면 됨)]
     GENERATOR_MODEL = None  # 실제 사용할 모델명 (예: gpt-4, gemini-pro)
@@ -45,6 +51,10 @@ class AppConfig:
     OPTIMIZER_MODEL = None  # Optimizer LLM 모델명
     TESTER_MODEL = None     # Target/Tester LLM 모델명
 
+    # [OpenAI Raw Config]
+    OPENAI_API_KEY = None
+    OPENAI_ORG_ID = None
+    
     # [Azure Raw Config] 
     AZURE_OPENAI_API_KEY = None
     AZURE_OPENAI_ENDPOINT = None
@@ -102,6 +112,9 @@ class AppConfig:
         # 2. USE_AZURE 플래그 확인
         use_azure_raw = os.getenv("USE_AZURE", "False")
         cls.USE_AZURE = str(use_azure_raw).lower() in ("true", "1", "yes", "on")
+        
+        # 2-1. TEXTGRAD_PROVIDER 확인 (openai/azure/google)
+        cls.TEXTGRAD_PROVIDER = os.getenv("TEXTGRAD_PROVIDER", "azure" if cls.USE_AZURE else "google").lower()
 
         # 3. 로컬 전용 키 파일 로드 시도 (key 폴더)
         if cls.USE_AZURE:
@@ -125,6 +138,14 @@ class AppConfig:
             
             # 매핑 실행
             cls._configure_google()
+        
+        # 3-1. TextGrad가 OpenAI를 사용하는 경우 추가 설정
+        if cls.TEXTGRAD_PROVIDER == "openai":
+            openai_env_path = cls.PROJECT_ROOT / "key/openai.env"
+            if openai_env_path.exists():
+                logger.info(f">>> [Local] OpenAI 키 파일을 로드합니다: {openai_env_path}")
+                load_dotenv(openai_env_path, override=True)
+            cls._configure_openai()
 
         # 4. DB 설정 파일 로드 (공통)
         db_env_path = cls.PROJECT_ROOT / "key/db.env"
@@ -175,9 +196,14 @@ class AppConfig:
         # RAGAS 평가자 모델은 gpt-5-mini, gpt-5-nano 를 지원하지 않음 (temperature 파라미터 문제)
 
 
-        # TEXTGRAD_BASELINE 설정
-        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # TextGrad Backward Engine 모델 (예: gpt-4o-mini)
-        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # TextGrad Forward Engine 모델 (예: gpt-4o-mini)
+        # TEXTGRAD_BASELINE 설정 (.env에서 우선 읽기, 없으면 Azure deployment 사용)
+        # [이전 방식 - 하드코딩] Azure deployment 직접 지정
+        # cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
+        # cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
+        
+        # [현재 방식] .env의 TEXTGRAD_*_MODEL 우선, 없으면 Azure deployment 사용
+        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
+        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
 
         # DATASET 생성용 모델 설정
         cls.DATASET_GENERATOR_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # 데이터셋 생성용 모델 (예: gpt-5-mini)
@@ -197,9 +223,29 @@ class AppConfig:
         cls.OPTIMIZER_MODEL = os.getenv("OPTIMIZER_MODEL", cls.GENERATOR_MODEL)
         cls.TESTER_MODEL = os.getenv("TESTER_MODEL", cls.GENERATOR_MODEL)
         
+        # TextGrad 모델 설정 (.env에서 우선 읽기, 없으면 기본값)
+        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_FORWARD_ENGINE_MODEL", "gemini-1.5-pro")
+        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_BACKWARD_ENGINE_MODEL", "gemini-1.5-pro")
         
         if not cls.API_KEY:
             logger.warning("Google API Key가 설정되지 않았습니다.")
+    
+    @classmethod
+    def _configure_openai(cls):
+        """OpenAI 환경변수를 공통 변수에 매핑 (TextGrad 전용)"""
+        cls.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+        cls.OPENAI_ORG_ID = os.getenv("OPENAI_ORG_ID")
+        
+        # TextGrad 전용이므로 공통 API_KEY는 변경하지 않음
+        # 대신 TEXTGRAD_*_MODEL 설정만 사용
+        
+        # TextGrad 모델 설정 (.env에서 우선 읽기, 없으면 기본값)
+        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_FORWARD_ENGINE_MODEL", "gpt-3.5-turbo-0125")
+        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_BACKWARD_ENGINE_MODEL", "gpt-3.5-turbo-0125")
+        
+        if not cls.OPENAI_API_KEY:
+            logger.warning("OpenAI API Key가 설정되지 않았습니다.")
+            logger.warning("TextGrad 실험을 OpenAI로 실행하려면 key/openai.env 파일에 OPENAI_API_KEY를 설정하세요.")
     
     @classmethod
     def _configure_database(cls):
