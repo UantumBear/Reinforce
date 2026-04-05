@@ -11,8 +11,8 @@ textgrad_baseline.py 와 textgrad_improve.py 에서
 """
 import os
 from typing import Literal, Tuple, List
-from metrics.prompts.textgrad_improve_prompts import TEXTGRAD_IMPROVE_PROMPT_V001
 
+from metrics.prompts.textgrad_improve_prompts import TEXTGRAD_IMPROVE_PROMPT_V001
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from datafile.data_loader import load_dataset
 from agent.prompts.baseline_prompt import (
@@ -20,6 +20,10 @@ from agent.prompts.baseline_prompt import (
     GPQA_INIT_PROMPT,
     MMLU_INIT_PROMPT,
     DEFAULT_INIT_PROMPT
+)
+from reward.gsm8k_objective_func import (
+    get_gsm8k_baseline_objective_function,
+    get_gsm8k_improve_objective_function
 )
 
 
@@ -242,6 +246,46 @@ class TextGradExperiment:
         else:
             return DEFAULT_INIT_PROMPT
     
+    def get_objective_function(self, ground_truth: str) -> str:
+        """
+        데이터셋과 실험 모드에 맞는 Objective Function(평가 지시문)을 반환한다.
+        
+        @논문 근거:
+            TextGrad 논문에서는 데이터셋별로 다른 평가 전략을 사용합니다:
+            - GSM8k baseline: 실제 논문에서는 목적 함수를 사용하지 않음 (빈 문자열 반환)
+            - GSM8k improve: 커스텀 평가 지시문 사용
+            - 기타 데이터셋: 일반 RAG 평가 지시문
+        
+        @Args:
+            ground_truth: 정답 (Reference Answer)
+        
+        @Return:
+            Objective Function 문자열 (TextLoss에 전달할 평가 지시문)
+        """
+        dataset_name_lower = self.default_dataset_name.lower()
+        
+        # GSM8k 데이터셋
+        if 'gsm8k' in dataset_name_lower:
+            if self.mode == 'baseline':
+                return get_gsm8k_baseline_objective_function(ground_truth)
+            elif self.mode == 'improve':
+                return get_gsm8k_improve_objective_function(ground_truth)
+        
+        # 기타 데이터셋 (GPQA, MMLU, NASA 등) - 추후 확장
+        # TODO: 각 데이터셋별 objective function 구현
+        else:
+            # 임시: 일반 RAG 평가 지시문 (기본값)
+            return (
+                "You are a critical and rigorous evaluator for RAG systems. "
+                "Your task is to examine the predicted answer step-by-step and identify potential flaws.\n\n"
+                f"**Reference Answer:** {ground_truth}\n\n"
+                "**Evaluation Criteria:**\n"
+                "1. Does the prediction fully address the question based on the given context?\n"
+                "2. Are there any factual inaccuracies or hallucinations?\n"
+                "3. Is the reasoning clear and logically sound?\n"
+                "4. What specific improvements would make this answer better?\n\n"
+                "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
+            )
     
     
     # def build_evaluation_instruction(self, ground_truth: str) -> str:
