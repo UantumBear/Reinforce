@@ -41,28 +41,31 @@ def patch_textgrad_openai_compatibility():
     # 원본 메서드를 백업 (다른 모델은 이 원본을 계속 사용)
     ChatOpenAI._original_generate_from_single_prompt = ChatOpenAI._generate_from_single_prompt
 
-    def _patched_generate_from_single_prompt(self, prompt: str, system_prompt: str = None, temperature=0, max_tokens=10000, top_p=0.99):
+    def _patched_generate_from_single_prompt(self, prompt: str, system_prompt: str = None, temperature=0, max_tokens=None, top_p=0.99):
         """
         수정된 프롬프트 생성 메서드.
         모델명에 따라 다른 API 호출 방식을 사용한다.
         
-        [개선] max_tokens을 role에 따라 동적으로 조정:
-        - OptimizerLLM (backward): 긴 프롬프트 생성 필요 → 10000 tokens
-        - ForwardLLM (tester): 답변 생성 → 2000 tokens (기본값)
+        [개선] max_tokens을 모델명 기반으로 동적 설정:
+        - gpt-3.5-turbo-0125, gpt-4o: 4096 tokens (모델 제한)
+        - 그 외: 10000 tokens
+        - 환경변수 TEXTGRAD_MAX_TOKENS로 오버라이드 가능
         """
         import os
         
         model_name = (self.model_string or "").lower()
-        
-        # [추가] System prompt에 "optimizer"가 포함되어 있으면 OptimizerLLM으로 판단
         sys_prompt_arg = system_prompt if system_prompt else self.system_prompt
-        is_optimizer = "optimizer" in (sys_prompt_arg or "").lower() or "optimization" in (sys_prompt_arg or "").lower()
         
-        # OptimizerLLM은 더 많은 토큰 필요 (환경변수로 오버라이드 가능)
-        if is_optimizer:
-            max_tokens = int(os.getenv("TEXTGRAD_OPTIMIZER_MAX_TOKENS", "20000"))
-        else:
-            max_tokens = int(os.getenv("TEXTGRAD_FORWARD_MAX_TOKENS", str(max_tokens)))
+        # [모델별 max_tokens 설정]
+        if max_tokens is None:
+            # 토큰 제한이 4096인 모델들
+            if "gpt-3.5-turbo-0125" in model_name or model_name == "gpt-4o":
+                default_max_tokens = 4096
+            else:
+                default_max_tokens = 10000
+            
+            # 환경변수로 오버라이드 가능
+            max_tokens = int(os.getenv("TEXTGRAD_MAX_TOKENS", str(default_max_tokens)))
         
         # o-series (o1, o3 등) 또는 gpt-5 모델인 경우
         if model_name.startswith("o") or model_name.startswith("gpt-5"):
