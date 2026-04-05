@@ -63,9 +63,11 @@ import re
 import math
 import random
 import atexit
+import traceback
 
 from datetime import datetime
 import textgrad as tg
+from textgrad.autograd.string_based_ops import StringBasedFunction
 from textgrad.optimizer.optimizer import TextualGradientDescentwithMomentum
 from utils.environment.experiment import TextGradExperiment
 from utils.environment.textgrad_log_builder import (
@@ -95,6 +97,8 @@ from utils.text.normalization import normalize_text_field
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from utils.llm_patches.textgrad_info import get_tgd_optimizer_system_prompt, stringify_tgd_update_prompt
 
+# GSM8k 평가 함수
+from metrics.judges.gsm8k_judge import parse_integer_answer
 
 # 기타 LLM get 함수들
 from metrics.judges.similarity_judge import create_similarity_judge 
@@ -109,11 +113,7 @@ from metrics.judges.multiple_choice_judge import (
 )
 
 # GSM8k 평가 유틸리티 (수학 문제 데이터셋용)
-from metrics.judges.gsm8k_judge import compute_gsm8k_accuracy
-
-
-
-
+from metrics.judges.gsm8k_judge import string_based_equality_fn
 
 
 
@@ -142,17 +142,41 @@ def main():
     current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_id = f"textgrad_baseline_{current_time}"
     
-    # TextGrad 엔진 초기화: Forward(전방 생성) / Backward(역전파 피드백) 분리
+    # ============================================================================
+    # TextGrad 엔진 초기화: 2가지 역할로 나뉜 LLM
+    # ============================================================================
     # get_textgrad_*_engine()은 (engine, model_name) 튜플을 반환:
     #   - engine: 실제 LLM API를 호출하는 실행 객체 (예: ChatOpenAI 인스턴스)
-    #   - model_name: 사용된 모델명 문자열 (예: "gpt-5.4-mini") - DB 로그 기록용
+    #   - model_name: 사용된 모델명 문자열 (예: "gpt-4o-mini") - DB 로그 기록용
+    
+    # 1️⃣ forward_engine (답변 생성자 LLM)
+    #    ┌─────────────────────────────────────────────────┐
+    #    │ 역할: 문제를 풀고 답변 생성 (단 1가지!)        │
+    #    │ 예시: "5 + 3 = 8개입니다"                      │
+    #    │ 사용처: model(query) 호출 시만                 │
+    #    └─────────────────────────────────────────────────┘
     forward_engine, textgrad_forward_model_nm = get_textgrad_forward_engine()
+    
+    # 2️⃣ backward_engine (선생님 LLM - 평가/피드백/최적화 모두 담당!)
+    #    ┌─────────────────────────────────────────────────────────────────┐
+    #    │ 역할 A: 평가 (Evaluation Forward)                             │
+    #    │   - TextLoss 사용 시: loss(prediction) 호출하면 이 엔진 사용  │
+    #    │   - 예시: "이 답변은 정확합니다. 10/10점"                      │
+    #    │   ★ 주의: forward_engine 아님!                                │
+    #    ├─────────────────────────────────────────────────────────────────┤
+    #    │ 역할 B: 피드백 생성 (Evaluation Backward)                     │
+    #    │   - loss.backward() 호출하면 이 엔진 사용                     │
+    #    │   - 예시: "프롬프트에 '단계별로 풀이하라' 추가 필요"          │
+    #    ├─────────────────────────────────────────────────────────────────┤
+    #    │ 역할 C: 프롬프트 개선 (Optimizer)                             │
+    #    │   - optimizer.step() 호출하면 이 엔진 사용                    │
+    #    │   - 예시: "문제를 풀어라" → "문제를 단계별로 풀어라"          │
+    #    └─────────────────────────────────────────────────────────────────┘
+    #    ★ 핵심: backward_engine 하나가 A, B, C 역할 모두 담당!
     backward_engine, textgrad_backward_model_nm = get_textgrad_backward_engine()
     
-    # forward_engine: 답변 생성용 LLM 엔진 (tg.BlackboxLLM에서 사용)
-    # backward_engine: 피드백 생성용 LLM 엔진 (TextGrad의 "비평가/교사" 역할)
-    #   - loss.backward() 시 생성된 피드백(gradient text)을 바탕으로 
-    #   - optimizer가 프롬프트를 어떻게 개선할지 판단할 때 사용
+    # TextGrad 라이브러리에 backward_engine 전역 설정
+    # 이후 모든 평가/피드백/최적화는 이 backward_engine 사용!
     tg.set_backward_engine(backward_engine)
     
     print_step("4. TextGrad 최적화 실행")
@@ -173,28 +197,48 @@ def main():
     #   - 각 Judge는 구조화된 JSON 형태로 평가 결과 반환
     # judge_loss_fn = CaseAwareJudgeLoss()  # TODO: 다음 단계 구현
 
-    # 3. 최적화 대상 정의
-    # role_description은 [지금 고쳐야 할 대상(변수)의 정체]를 말한다.
+    # 3. 최적화 대상 정의 (system_prompt)
+    # ★ 이 system_prompt가 forward_engine(답변 생성자 LLM)에게 전달됨
+    # ★ TextGrad의 최종 목표: 이 프롬프트를 개선해서 답변 품질을 높이기!
+    # 
     # initial_prompt는 데이터셋에 따라 TextGradExperiment에서 자동 설정
+    # 예: "Solve the following math problem step by step."
     initial_prompt = EXPERIMENT_INS.get_initial_prompt()
     print(f"[✓] 초기 프롬프트: {initial_prompt}..." if len(initial_prompt) > 100 else f"[✓] 초기 프롬프트: {initial_prompt}")
-    # 아래 system_prompt 는 Forward Engeind (=ServiceLLM) 에게 전달되는 시스템 프롬프트.
+    
+    # requires_grad=True: optimizer가 이 프롬프트를 개선할 수 있도록 설정
+    # role_description: backward_engine(평가자 LLM)이 피드백 생성 시 참고
     system_prompt = tg.Variable(
         initial_prompt, 
         requires_grad=True, 
         role_description="system prompt to the language model"
     )
 
-    # [중요] Prompt Optimization 경로
-    # engine.generate()를 직접 호출하면 system_prompt와 계산 그래프가 연결되지 않아
-    # get_gradient_text()가 비어 있을 수 있다.
-    # 따라서 TextGrad 권장 방식인 BlackboxLLM(system_prompt=...)을 사용한다.
+    # [중요] BlackboxLLM: forward_engine(답변 생성자 LLM)을 감싼 wrapper
+    # - engine.generate()를 직접 호출하면 system_prompt와 계산 그래프가 연결되지 않음
+    # - BlackboxLLM을 사용하면 system_prompt가 최적화 대상으로 등록됨
+    # - model(query) 호출 시 내부적으로 forward_engine이 답변 생성
+    # ★ model ≠ forward_engine (model은 forward_engine을 사용하는 wrapper)
     model = tg.BlackboxLLM(engine=forward_engine, system_prompt=system_prompt)
 
     momentum_window = int(
         os.getenv("TEXTGRAD_MOMENTUM_WINDOW", os.getenv("TEXTGRAD_MOMENTUM_GRADIENT_MEMORY", "3"))
     )
 
+    # ============================================================================
+    # 4. Optimizer 생성 - backward_engine(평가자 LLM)을 사용하여 프롬프트 개선
+    # ============================================================================
+    # TextualGradientDescentwithMomentum:
+    # - parameters: 개선할 대상 (system_prompt)
+    # - engine: backward_engine(평가자 LLM) 사용
+    # - optimizer.step() 호출 시:
+    #   1. system_prompt.gradients에서 피드백(gradient) 가져오기
+    #   2. backward_engine에게 "이 피드백을 바탕으로 새 프롬프트 만들어줘" 요청
+    #   3. backward_engine이 개선된 프롬프트 생성
+    #   4. system_prompt 업데이트
+    # 
+    # 예: 피드백 "단계별 설명 필요" → backward_engine: "문제를 단계별로 풀어라"
+    
     # 일반 옵티마이저 (비교/회귀 확인용)
     # optimizer = tg.TGD(
     #     parameters=list(model.parameters()),
@@ -211,7 +255,7 @@ def main():
     
     optimizer = TextualGradientDescentwithMomentum(
         parameters=list(model.parameters()),
-        engine=backward_engine,
+        engine=backward_engine,  # ← backward_engine(평가자 LLM)이 프롬프트 개선!
         momentum_window=momentum_window,
         # optimizer_system_prompt=custom_optimizer_system_prompt,
     )
@@ -369,11 +413,20 @@ def main():
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
-                score = compute_gsm8k_accuracy(pred, val_gt)
-                cached_val_score_current += (score if score is not None else 0.0)
+                # GSM8k 정확도 계산: 숫자 추출 후 비교
+                pred_num = parse_integer_answer(pred)
+                gt_num = parse_integer_answer(val_gt)
+                score = 1.0 if pred_num == gt_num else 0.0
+                cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
-                print(f"  ⚠️ 초기 캐시 평가 샘플 [{val_idx}] 에러: {e}")
+                print(f"  ⚠️ 초기 캐시 평가 샘플 [{val_idx}] 에러:")
+                print(f"     에러 타입: {type(e).__name__}")
+                print(f"     에러 메시지: {e}")
+                print(f"     질문: {val_question[:100]}...")
+                print(f"\n  [상세 스택 트레이스]")
+                traceback.print_exc()
+                print()
                 continue
     elif is_multiple_choice:
         # GPQA 등 multiple-choice (현재 실험에서 실행되지 않는 분기, 구조만 유지)
@@ -390,7 +443,13 @@ def main():
                 cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
-                print(f"  ⚠️ 초기 캐시 평가 샘플 [{val_idx}] 에러: {e}")
+                print(f"  ⚠️ 초기 캐시 평가 샘플 [{val_idx}] 에러:")
+                print(f"     에러 타입: {type(e).__name__}")
+                print(f"     에러 메시지: {e}")
+                print(f"     질문: {val_question[:100]}...")
+                print(f"\n  [상세 스택 트레이스]")
+                traceback.print_exc()
+                print()
                 continue
     else:
         for val_idx, val_data in enumerate(validation_dataset, 1):
@@ -406,7 +465,13 @@ def main():
                 cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
-                print(f"  ⚠️ 초기 캐시 평가 샘플 [{val_idx}] 에러: {e}")
+                print(f"  ⚠️ 초기 캐시 평가 샘플 [{val_idx}] 에러:")
+                print(f"     에러 타입: {type(e).__name__}")
+                print(f"     에러 메시지: {e}")
+                print(f"     질문: {val_question[:100]}...")
+                print(f"\n  [상세 스택 트레이스]")
+                traceback.print_exc()
+                print()
                 continue
 
     if cached_val_count > 0:
@@ -468,14 +533,14 @@ def main():
 
                 if is_multiple_choice and test_time_updates > 1:
                     # [GPQA/MMLU/HQH 경로] - 솔루션 최적화 루프
-                    # test_time_updates(=3)번 답변 생성 후 Majority Voting
+                    # test_time_updates(=3)번 forward_engine으로 답변 생성 후 Majority Voting
                     # ※ 현재 실험에서는 실행되지 않는 분기입니다.
                     test_time_predictions = []
                     test_time_choices = []
                     first_prediction_var = None
 
                     for update_idx in range(test_time_updates):
-                        pred_var = model(query_var)
+                        pred_var = model(query_var)  # ← forward_engine(답변 생성자 LLM) 호출
                         pred_text = pred_var.value
                         test_time_predictions.append(pred_text)
 
@@ -496,34 +561,71 @@ def main():
 
                 else:
                     # [GSM8k / 그 외 경로] - 프롬프트 최적화 루프
-                    # test_time_updates=1: Forward 1회만 호출 (논문 기준)
-                    prediction_var = model(query_var)
-                    prediction = prediction_var.value
+                    # test_time_updates=1: Model Forward 1회만 호출 (논문 기준)
+                    
+                    # ============================================================================
+                    # ★ Step 1: Model Forward - 답변 생성자 LLM(forward_engine)이 답변 생성
+                    # ============================================================================
+                    # model(query_var) 호출 시:
+                    # 1. BlackboxLLM이 내부적으로 forward_engine 호출
+                    # 2. forward_engine에게 system_prompt + query 전달
+                    # 3. forward_engine(답변 생성자 LLM)이 답변 생성
+                    # 
+                    # 예: "5 + 3은 몇 개? 단계별로 풀어라" → forward_engine: "5 + 3 = 8개"
+                    prediction_var = model(query_var)  # ← forward_engine(답변 생성자 LLM) 호출!
+                    ㅌ = prediction_var.value
+                    
+                    # ★ accuracy는 StringBasedFunction 결과를 변환하여 사용 (아래에서 설정)
                     accuracy = None
-
-                    if is_gsm8k:
-                        accuracy = compute_gsm8k_accuracy(prediction, ground_truth)
-                        print(f"[Accuracy - GSM8k] Model: {prediction[:100]}..., Ground Truth: {ground_truth[:100]}..., Acc: {accuracy}")
                 
-                # Gradient 생성 (TextGrad 논문 방식: 엄격한 페르소나 부여)
-                # 논문의 Solution Refinement 평가 프롬프트를 RAG 도메인에 맞게 수정
-                # [정의] evaluation_instruction: 비평가 TeacherLLM(백워드엔진) 에게 건네는 채점 가이드 라인이다.
-                # INFO:  비판 가이드라인 설정
-                # TODO: 이건 되는데..
-                evaluation_instruction = (
-                    "You are a critical and rigorous evaluator for RAG systems. "
-                    "Your task is to examine the predicted answer step-by-step and identify potential flaws.\n\n"
-                    f"**Reference Answer:** {ground_truth}\n\n"
-                    "**Evaluation Criteria:**\n"
-                    "1. Does the prediction fully address the question based on the given context?\n"
-                    "2. Are there any factual inaccuracies or hallucinations?\n"
-                    "3. Is the reasoning clear and logically sound?\n"
-                    "4. What specific improvements would make this answer better?\n\n"
-                    "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
-                )
-                loss = tg.TextLoss(evaluation_instruction) # (Teacher)에게 "이런 기준으로 채점해!"라고 지시.
-                computed_loss = loss(prediction_var) # 학생(Tester)이 응답을 낸다. 
-                losses.append(computed_loss)
+                # ★ Step 2: Evaluation Function 생성 (평가 방식 선택)
+                # [정의] evaluation_instruction: 평가자 LLM(backward_engine)에게 건네는 채점 가이드라인
+                # 데이터셋(gsm8k 등)과 모드(baseline/improve)에 따라 다른 평가 방식 사용
+                
+                # [조건부 처리] GSM8k baseline: StringBasedFunction (논문 방식) / 그 외: TextLoss (기존 방식)
+                if is_gsm8k and EXPERIMENT_INS.mode == 'baseline':
+                    # [논문 재현] StringBasedFunction 사용:
+                    # - Evaluation Forward: Python 함수로 0/1 계산 (backward_engine 호출 X, 비용 절감!)
+                    # - Evaluation Backward: backward_engine(평가자 LLM)으로 피드백 생성
+                    # 
+                    # 흐름: forward_engine이 답변 생성 → Python이 정답 체크 → backward_engine이 피드백
+                    ground_truth_var = tg.Variable(
+                        ground_truth, 
+                        role_description="the correct answer for the math problem",
+                        requires_grad=False
+                    )
+                    eval_fn = StringBasedFunction(
+                        string_based_equality_fn,
+                        function_purpose="Checks if the prediction is correct by comparing the numerical answer"
+                    )
+                    computed_loss = eval_fn(
+                        inputs=dict(prediction=prediction_var, ground_truth_answer=ground_truth_var),
+                        response_role_description="Whether the prediction is correct (1) or not (0)"
+                    )
+                    losses.append(computed_loss)
+                    print(f"[StringBasedFunction] Result: {computed_loss.value} (0=wrong, 1=correct)")
+                    
+                    # ★ Accuracy 변환: StringBasedFunction 결과를 재사용 (중복 계산 제거!)
+                    # computed_loss.value는 "0" 또는 "1" (문자열 또는 int)
+                    # → float로 변환하여 DB 저장용 accuracy로 사용
+                    try:
+                        accuracy = float(computed_loss.value)
+                        print(f"[Accuracy - GSM8k] From StringBasedFunction: {accuracy}")
+                    except (ValueError, TypeError):
+                        accuracy = None
+                        print(f"[Warning] Failed to convert loss to accuracy: {computed_loss.value}")
+                        
+                else:
+                    # [기존 방식] TextLoss 사용:
+                    # - Evaluation Forward: backward_engine(평가자 LLM)이 답변 평가하고 점수 생성
+                    # - Evaluation Backward: backward_engine(평가자 LLM)이 피드백 생성
+                    # 
+                    # 흐름: forward_engine이 답변 생성 → backward_engine이 평가 → backward_engine이 피드백
+                    # (총 LLM 호출 3번 vs StringBasedFunction은 2번 - 비용 1/3 절감!)
+                    evaluation_instruction = EXPERIMENT_INS.get_objective_function(ground_truth)
+                    loss = tg.TextLoss(evaluation_instruction)
+                    computed_loss = loss(prediction_var)  # ← backward_engine(평가자 LLM)이 평가
+                    losses.append(computed_loss)
                 
                 # 점수 계산
                 raw_similarity = None
@@ -583,15 +685,30 @@ def main():
                 continue
         # ====================================== 디버깅 ====================================== #
 
-        # 논문의 핵심: tg.sum()으로 배치 손실 병합 후 backward
-        # backward_engine(Teacher LLM)이 텍스트 기울기(Textual Gradient)를 생성합니다.
+        # ============================================================================
+        # Backward Pass: 평가자 LLM(backward_engine)이 피드백(gradient) 생성
+        # ============================================================================
+        # 1. tg.sum()으로 배치 내 모든 loss 병합
+        # 2. backward() 호출 시:
+        #    - StringBasedFunction: backward_engine이 피드백 생성 (LLM 호출 1회)
+        #    - TextLoss: backward_engine이 피드백 생성 (LLM 호출 1회)
+        # 3. 생성된 피드백(gradient)은 system_prompt.gradients에 저장됨
+        # 
+        # 예시 피드백: "프롬프트에 '단계별로 풀이하라'를 추가하세요"
         total_loss = tg.sum(losses)
-        total_loss.backward()
+        total_loss.backward()  # ← backward_engine(평가자 LLM)이 피드백 생성!
 
-        # 3) 후보 프롬프트 생성 (step() 전에!)
-        # [중요] zero_grad() 전에 gradient 텍스트를 먼저 백업
+        # 3) 후보 프롬프트 생성 (optimizer.step() 전에 gradient 텍스트 백업)
+        # system_prompt.get_gradient_text(): backward()에서 생성된 피드백 텍스트
         prompt_feedback_text = system_prompt.get_gradient_text().strip() or "[N/A]"
 
+        # ============================================================================
+        # Optimizer Step: 평가자 LLM(backward_engine)이 새 프롬프트 생성
+        # ============================================================================
+        # optimizer._update_prompt() 내부에서 backward_engine이 호출됨
+        # 입력: 현재 프롬프트 + 피드백(gradient) + 과거 이력(momentum)
+        # 출력: 개선된 새 프롬프트
+        # 예: "문제를 풀어라" → "문제를 단계별로 풀고 답을 명확히 제시하라"
         if isinstance(optimizer, TextualGradientDescentwithMomentum):
             update_prompt_value = optimizer._update_prompt(
                 system_prompt,
@@ -730,8 +847,10 @@ def main():
                 pred_cand = model(val_var_cand).value
 
                 if is_gsm8k:
-                    score_cand = compute_gsm8k_accuracy(pred_cand, val_gt)
-                    score_cand = score_cand if score_cand is not None else 0.0
+                    # GSM8k 정확도 계산: 숫자 추출 후 비교
+                    pred_num = parse_integer_answer(pred_cand)
+                    gt_num = parse_integer_answer(val_gt)
+                    score_cand = 1.0 if pred_num == gt_num else 0.0
                 elif is_multiple_choice:
                     score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0.0
                 else:
