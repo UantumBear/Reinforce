@@ -58,17 +58,38 @@ NaN(계산 망가짐):
 """
 DEBUG_INDIVIDUAL_BACKWARD = False # 디버그 모드
 
+# ============================================================================
+# [성능 프로파일링] 파일 실행 시작 시점 기록
+# ============================================================================
+import time
+_SCRIPT_START_TIME = time.time()
+
+def _print_elapsed(label):
+    """파일 시작부터 현재까지 경과 시간 출력"""
+    elapsed = time.time() - _SCRIPT_START_TIME
+    print(f"[⏱️  {elapsed:.2f}s] {label}")
+
+
+import textgrad as tg
+_print_elapsed(f"textgrad import 완료")
+
+
+_print_elapsed("기본 라이브러리 import 시작")
 import os
 import re
 import math
 import random
 import atexit
 import traceback
-
 from datetime import datetime
-import textgrad as tg
+_print_elapsed("기본 라이브러리 완료")
+
+_print_elapsed("textgrad 내부 모듈 import 시작")
 from textgrad.autograd.string_based_ops import StringBasedFunction
 from textgrad.optimizer.optimizer import TextualGradientDescentwithMomentum
+_print_elapsed("textgrad 내부 모듈 완료")
+
+_print_elapsed("로컬 utils 모듈 import 시작")
 from utils.environment.experiment import TextGradExperiment
 from utils.environment.textgrad_log_builder import (
     create_base_log,
@@ -79,25 +100,36 @@ from utils.environment.textgrad_log_builder import (
     build_tgd_optimizer_total_input
 )
 from utils.log.console import print_step
+_print_elapsed("utils 모듈 완료")
 
-from datafile.data_loader import load_dataset
+_print_elapsed("datafile, infrastructure import 시작")
+# from datafile.data_loader import load_dataset
 from infrastructure.llm_client import get_textgrad_backward_engine, get_textgrad_forward_engine
+_print_elapsed("datafile, infrastructure 완료")
 
+_print_elapsed("metrics.judges import 시작")
 from metrics.judges.ragas_failthfulness_judge import RagasFaithfulnessJudge
+_print_elapsed("RagasFaithfulnessJudge 완료")
+
+_print_elapsed("conf, models, db import 시작")
 from conf.config import Settings
 # 로그 저장을 위한 import (main_train.py 방식)
 from models.rl_optimization_log import RlOptimizationLog
 from db.connection.pg_client import pg_client
+_print_elapsed("conf, models, db 완료")
 
 # 공통으로 사용 가능 한 utils 함수들
+_print_elapsed("나머지 utils 함수들 import 시작")
 from utils.llm_errors.error_parsers import extract_root_error_message
 from utils.llm_errors.error_debugger import debug_individual_backward_samples
 from utils.llm_safety.azure_prompt_filters import has_jailbreak_like_pattern
 from utils.text.normalization import normalize_text_field
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from utils.llm_patches.textgrad_info import get_tgd_optimizer_system_prompt, stringify_tgd_update_prompt
+_print_elapsed("나머지 utils 완료")
 
 # GSM8k 평가 함수
+_print_elapsed("Judge 함수들 import 시작")
 from metrics.judges.gsm8k_judge import parse_integer_answer
 
 # 기타 LLM get 함수들
@@ -112,24 +144,31 @@ from metrics.judges.multiple_choice_judge import (
     compute_accuracy
 )
 
+_print_elapsed("Judge 함수들 완료")
 # GSM8k 평가 유틸리티 (수학 문제 데이터셋용)
 from metrics.judges.gsm8k_judge import string_based_equality_fn
 
-
+# Import 완료 시점 출력
+_print_elapsed("모든 라이브러리 Import 완료")
 
 
 def main():
+    _print_elapsed("main() 함수 진입")
+    
     print_step("0. [Settings] TextGrad 실험 환경 설정")
     # 패치를 명시적으로 먼저 적용
     TextGradExperiment.apply_patches()  # ← 여기서만 실행
     EXPERIMENT_INS = TextGradExperiment(mode='baseline')
+    _print_elapsed("실험 환경 설정 완료")
     
     print_step("1. [Settings] 기본 백엔드 설정 초기화")
     Settings.setup()
+    _print_elapsed("백엔드 설정 초기화 완료")
     
 
     print_step("2. 데이터 로드 및 Train/Validation 분할")
     dataset, train_pool, validation_dataset = EXPERIMENT_INS.load_and_split_data()
+    _print_elapsed("데이터 로드 완료")
     
     # [TextGrad 논문] Test-time updates 설정 (데이터셋별 자동 최적화)
     # - GPQA/MMLU/HQH: 3번 답변 생성 + Majority Voting (multiple-choice)
@@ -178,10 +217,15 @@ def main():
     # TextGrad 라이브러리에 backward_engine 전역 설정
     # 이후 모든 평가/피드백/최적화는 이 backward_engine 사용!
     tg.set_backward_engine(backward_engine)
+    _print_elapsed("TextGrad 엔진 초기화 완료")
     
     print_step("4. TextGrad 최적화 실행")
     similarity_judge = create_similarity_judge()
+    embedding_model_nm = similarity_judge.embedding_model_nm if similarity_judge else None
+    print(f"[DEBUG] Similarity Judge 초기화: {similarity_judge is not None}")
+    print(f"[DEBUG] Embedding Model Name: {embedding_model_nm}")
     ragas_judge = create_ragas_judge()
+    _print_elapsed("Judge 모델 초기화 완료")
     
     # 데이터셋 타입 감지 (accuracy 계산용)
     dataset_name_lower = EXPERIMENT_INS.default_dataset_name.lower()
@@ -359,6 +403,7 @@ def main():
                     optimizer_model_provider="azure",
                     tester_model_nm=log_data['tester_model_nm'],
                     tester_model_provider="azure",
+                    embedding_model_nm=log_data.get('embedding_model_nm'),
                     optimizer_system_prompt=log_data.get('optimizer_system_prompt'),
                     optimizer_total_input=log_data.get('optimizer_total_input'),
                     # critical_review: 프롬프트 최적화 관점의 TextGrad feedback
@@ -416,7 +461,11 @@ def main():
                 # GSM8k 정확도 계산: 숫자 추출 후 비교
                 pred_num = parse_integer_answer(pred)
                 gt_num = parse_integer_answer(val_gt)
-                score = 1.0 if pred_num == gt_num else 0.0
+                # 파싱 실패는 무조건 오답(0점) 처리
+                if pred_num is None or gt_num is None:
+                    score = 0.0
+                else:
+                    score = 1.0 if pred_num == gt_num else 0.0
                 cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
@@ -486,7 +535,7 @@ def main():
 
         # DB 로그용 공통 필드 생성
         # episode 컬럼 = iteration 번호 (논문에 episode 개념 없음, DB 컬럼 재사용)
-        base_log = create_base_log(experiment_id, iteration, textgrad_backward_model_nm, textgrad_forward_model_nm)
+        base_log = create_base_log(experiment_id, iteration, textgrad_backward_model_nm, textgrad_forward_model_nm, embedding_model_nm)
 
         iteration_log_start_idx = len(optimization_logs)
 
@@ -573,7 +622,7 @@ def main():
                     # 
                     # 예: "5 + 3은 몇 개? 단계별로 풀어라" → forward_engine: "5 + 3 = 8개"
                     prediction_var = model(query_var)  # ← forward_engine(답변 생성자 LLM) 호출!
-                    ㅌ = prediction_var.value
+                    prediction = prediction_var.value
                     
                     # ★ accuracy는 StringBasedFunction 결과를 변환하여 사용 (아래에서 설정)
                     accuracy = None
@@ -665,7 +714,24 @@ def main():
                 optimization_logs.append(create_error_log(
                     base_log, system_prompt.value, question, context, ground_truth, root_error
                 ))
-                continue
+                
+                # [치명적 에러 처리] 배치 일관성을 위해 즉시 중단
+                print(f"\n{'='*80}")
+                print(f"[!] 치명적 에러 발생 - 실험을 중단합니다")
+                print(f"{'='*80}")
+                print(f"Iteration: {iteration}/{total_iterations}")
+                print(f"에러 타입: {type(sample_error).__name__}")
+                print(f"에러 메시지: {root_error}")
+                print(f"질문: {question[:200]}...")
+                print(f"\n[상세 스택 트레이스]")
+                traceback.print_exc()
+                print(f"\n실험을 중단합니다. (로그는 자동 저장됩니다)")
+                
+                # 실험 중단 (atexit가 자동으로 로그 저장)
+                raise RuntimeError(
+                    f"Sample processing failed at iteration {iteration}. "
+                    f"Error: {root_error}"
+                ) from sample_error
             
         # 2) Gradient 계산 (TextGrad 논문 방식)
         if not losses:
@@ -850,7 +916,11 @@ def main():
                     # GSM8k 정확도 계산: 숫자 추출 후 비교
                     pred_num = parse_integer_answer(pred_cand)
                     gt_num = parse_integer_answer(val_gt)
-                    score_cand = 1.0 if pred_num == gt_num else 0.0
+                    # 파싱 실패는 무조건 오답(0점) 처리
+                    if pred_num is None or gt_num is None:
+                        score_cand = 0.0
+                    else:
+                        score_cand = 1.0 if pred_num == gt_num else 0.0
                 elif is_multiple_choice:
                     score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0.0
                 else:

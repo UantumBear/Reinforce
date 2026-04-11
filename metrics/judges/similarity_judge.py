@@ -4,7 +4,6 @@
 - 단순 유사도가 아닌 의미적 유사도인 근거는?
 - 
 """
-
 from infrastructure.embed_client import get_embedding_client
 
 class SimilarityJudge:
@@ -16,6 +15,7 @@ class SimilarityJudge:
     
     def __init__(self, use_azure=False):
         self.embed_client = get_embedding_client(use_azure=use_azure)
+        self.embedding_model_nm = self.embed_client.model_name
     
     def __call__(self, gold_answer, predicted_answer):
         """
@@ -36,7 +36,10 @@ class SimilarityJudge:
 
 def create_similarity_judge() -> SimilarityJudge | None:
     """
-        main_train.py와 동일한 임베딩 기반 유사도 평가기를 초기화한다. 
+    main_train.py와 동일한 임베딩 기반 유사도 평가기를 초기화한다.
+    
+    Returns:
+        SimilarityJudge | None: 초기화된 judge 객체 (실패 시 None)
     """
     try:
         return SimilarityJudge(use_azure=False)

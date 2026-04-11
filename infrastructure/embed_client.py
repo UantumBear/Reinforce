@@ -35,6 +35,7 @@ class EmbedClient:
         self._local_model = None         # 로컬 임베딩 모델
         self._azure_client = None        # Azure 임베딩 모델 사용을 위한 클라이언트
         self._langchain_instance = None  # (RAGAS 호환을 위한) LangChain 임베딩 인스턴스
+        self.model_name = None           # 사용 중인 모델명 (DB 로깅용)
         
         if auto_load:
             self.get_model()  # 미리 로드
@@ -76,6 +77,7 @@ class EmbedClient:
             try:
                 # 로컬 모델 로드 및 캐싱
                 self._local_model = SentenceTransformer(str(model_path))
+                self.model_name = model_path.name  # 모델명 저장 (예: "ko-sroberta-multitask")
                 print(f"[SUCCESS] 로컬 임베딩 모델 로드 완료: {model_path.name}")
             except Exception as e:
                 print(f"[ERROR] 로컬 임베딩 모델 로드 실패: {e}")
@@ -105,6 +107,7 @@ class EmbedClient:
                     api_version=Settings.AZURE_OPENAI_API_VERSION,
                     azure_endpoint=Settings.AZURE_OPENAI_ENDPOINT
                 )
+                self.model_name = getattr(Settings, 'AZURE_EMBEDDING3_SMALL_DEPLOYMENT', 'azure-embedding-3-small')
                 print("[SUCCESS] Azure 임베딩 클라이언트 로드 완료")
             except Exception as e:
                 print(f"[ERROR] Azure 임베딩 클라이언트 생성 실패: {e}")

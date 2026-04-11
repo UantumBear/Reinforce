@@ -200,7 +200,13 @@ def parse_integer_answer(answer: str, only_first_line: bool=False):
         answer = ''.join([c for c in answer if c.isdigit()])
         answer = int(answer)
     except (ValueError, IndexError):
-        answer = 0
+        """
+        만일 파싱에 실패했을 때 0을 반환하게 되면, 실제 정답이 0인 문제에서 모델이 엉뚱한 대답을 해 
+        파싱이 실패했음에도 불구하고 정답(1)으로 처리되는 False Positive(오탐) 문제가 발생할 수 있다.
+        그럼 어떻게 해야 할까?
+        """
+        # answer = 0
+        answer = None # 0 대신 None을 반환
     return answer
 
 def string_based_equality_fn(prediction: tg.Variable, ground_truth_answer: tg.Variable):
@@ -208,7 +214,16 @@ def string_based_equality_fn(prediction: tg.Variable, ground_truth_answer: tg.Va
     
     Returns:
         int: 1 (정답) 또는 0 (오답)
+    
+    Note:
+        - 파싱 실패(None) 시 무조건 0점 처리
+        - 이를 통해 False Positive (둘 다 파싱 실패 → None == None → 1점) 방지
     """
     pred_num = parse_integer_answer(str(prediction.value))
     gt_num = parse_integer_answer(str(ground_truth_answer.value))
+    
+    # 파싱 실패는 무조건 오답(0점) 처리
+    if pred_num is None or gt_num is None:
+        return 0
+    
     return int(pred_num == gt_num)
