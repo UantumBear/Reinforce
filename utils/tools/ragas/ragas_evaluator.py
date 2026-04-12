@@ -69,14 +69,19 @@ class RagasEvaluator:
         self.embedding_model = None
         self._init_models()
         
-        # 사용할 메트릭 설정
+        # 사용할 메트릭 설정 (RAGAS v0.1+ 방식에 맞춤)
         self.metrics = []
+        
+        # 메트릭에 모델 설정 시도 (가능한 경우에만)
         if self.config.use_faithfulness and faithfulness:
             self.metrics.append(faithfulness)
+            
         if self.config.use_answer_relevancy and answer_relevancy:
             self.metrics.append(answer_relevancy)
+            
         if self.config.use_context_precision and context_precision:
             self.metrics.append(context_precision)
+            
         if self.config.use_context_recall and context_recall:
             self.metrics.append(context_recall)
             
@@ -126,16 +131,17 @@ class RagasEvaluator:
             }
             
             if ground_truth:
-                data['ground_truths'] = [ground_truth] # rAGAS 에서 사용하는 필드명
+                # RAGAS v0.1+에서는 reference 필드를 사용
+                data['reference'] = [ground_truth]  # context_precision/recall용
+                data['ground_truths'] = [ground_truth]  # 기존 메트릭 호환성용
             
             # Dataset 생성
             dataset = Dataset.from_dict(data)
             
-            # 모델 사용 여부에 따라 평가 방식 달리 사용
+            # RAGAS 평가 실행 (v0.1+ 방식)
             if self.chat_model and self.embedding_model:
-                # llm_client 모델 사용
+                # 커스텀 모델 사용
                 print("[RAGAS] Using llm_client models for evaluation")
-                # RAGAS에 모델 전달 (방법은 RAGAS 버전에 따라 다름)
                 results = evaluate(
                     dataset, 
                     metrics=self.metrics,
@@ -147,23 +153,44 @@ class RagasEvaluator:
                 print("[RAGAS] Using default models for evaluation") 
                 results = evaluate(dataset, metrics=self.metrics)
             
-            # 결과 파싱
+            # 결과 파싱 - EvaluationResult 타입 지원
             result = RagasResult()
             result.raw_results = results
             
-            if 'faithfulness' in results:
-                result.faithfulness_score = float(results['faithfulness'])
-                result.is_faithful = result.faithfulness_score >= self.config.faithfulness_threshold
+            # 디버깅: 실제 결과 구조 확인
+            print(f"[RAGAS DEBUG] Results type: {type(results)}")
+            print(f"[RAGAS DEBUG] Results content: {results}")
             
-            if 'answer_relevancy' in results:
-                result.answer_relevancy_score = float(results['answer_relevancy']) 
-                result.is_relevant = result.answer_relevancy_score >= self.config.answer_relevancy_threshold
+            # EvaluationResult 타입 처리
+            if hasattr(results, '_repr_dict'):
+                # EvaluationResult 객체인 경우 _repr_dict 사용
+                results_dict = results._repr_dict
+                print(f"[RAGAS DEBUG] Using EvaluationResult._repr_dict: {results_dict}")
+            elif hasattr(results, 'iloc'):
+                # DataFrame인 경우 첫 번째 행 추출
+                row_data = results.iloc[0].to_dict() if len(results) > 0 else {}
+                print(f"[RAGAS DEBUG] Extracted DataFrame row: {row_data}")
+                results_dict = row_data
+            elif isinstance(results, dict):
+                # 딕셔너리인 경우 그대로 사용
+                results_dict = results
+                print(f"[RAGAS DEBUG] Using dict result: {results_dict}")
+            else:
+                # 기타 형태는 빈 딕셔너리
+                results_dict = {}
+                print(f"[RAGAS DEBUG] Unknown results type, using empty dict")
             
-            if 'context_precision' in results:
-                result.context_precision_score = float(results['context_precision'])
-                
-            if 'context_recall' in results:
-                result.context_recall_score = float(results['context_recall'])
+            # 안전한 결과 파싱
+            result.faithfulness_score = float(results_dict.get('faithfulness', 0.0))
+            result.is_faithful = result.faithfulness_score >= self.config.faithfulness_threshold
+            
+            result.answer_relevancy_score = float(results_dict.get('answer_relevancy', 0.0))
+            result.is_relevant = result.answer_relevancy_score >= self.config.answer_relevancy_threshold
+            
+            result.context_precision_score = float(results_dict.get('context_precision', 0.0))
+            result.context_recall_score = float(results_dict.get('context_recall', 0.0))
+            
+            print(f"[RAGAS DEBUG] Final parsed scores: faithfulness={result.faithfulness_score:.4f}, answer_relevancy={result.answer_relevancy_score:.4f}")
             
             return result
             
