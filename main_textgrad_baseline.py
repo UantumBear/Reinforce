@@ -397,6 +397,9 @@ def main():
                     ragas_faithfulness_score=log_data.get('ragas_faithfulness_score'),
                     ragas_answer_relevancy_score=log_data.get('ragas_answer_relevancy_score'),
                     accuracy=log_data.get('accuracy'),
+                    validation_info=log_data.get('validation_info'),
+                    validation_accuracy=log_data.get('validation_accuracy'),
+                    validation_dataset_size=log_data.get('validation_dataset_size'),
                     dataset_size=log_data.get('dataset_size'),
                     avg_total_score=log_data.get('avg_total_score'),
                     optimizer_model_nm=log_data['optimizer_model_nm'],
@@ -447,6 +450,7 @@ def main():
     print(f"\n[초기 캐싱] 초기 프롬프트 Validation 점수 평가...")
     cached_val_score_current = 0.0
     cached_val_count = 0
+    initial_validation_info = {}  # 초기 프롬프트의 validation 샘플 정보
 
     if is_gsm8k:
         for val_idx, val_data in enumerate(validation_dataset, 1):
@@ -466,6 +470,15 @@ def main():
                     score = 0.0
                 else:
                     score = 1.0 if pred_num == gt_num else 0.0
+                
+                # Validation 샘플 정보 수집
+                initial_validation_info[str(val_idx - 1)] = {
+                    "Q": val_question,
+                    "A": pred,
+                    "GA": val_gt,
+                    "score": score
+                }
+                
                 cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
@@ -489,6 +502,15 @@ def main():
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
                 score = similarity_judge(val_gt, pred) if similarity_judge else 0.0
+                
+                # Validation 샘플 정보 수집
+                initial_validation_info[str(val_idx - 1)] = {
+                    "Q": val_question,
+                    "A": pred,
+                    "GA": val_gt,
+                    "score": score
+                }
+                
                 cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
@@ -511,6 +533,15 @@ def main():
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
                 score = similarity_judge(val_gt, pred) if similarity_judge else 0.0
+                
+                # Validation 샘플 정보 수집
+                initial_validation_info[str(val_idx - 1)] = {
+                    "Q": val_question,
+                    "A": pred,
+                    "GA": val_gt,
+                    "score": score
+                }
+                
                 cached_val_score_current += score
                 cached_val_count += 1
             except Exception as e:
@@ -526,6 +557,7 @@ def main():
     if cached_val_count > 0:
         cached_val_score_current /= cached_val_count
     print(f"[초기 캐싱] 완료: {cached_val_score_current:.4f} ({cached_val_count}개 평가)")
+    print(f"[초기 캐싱] Validation 샘플 정보: {len(initial_validation_info)}개 수집")
 
     # ========== [TextGrad 논문 재현 루프 시작] ==========
     for iteration in range(1, total_iterations + 1):
@@ -882,6 +914,7 @@ def main():
         # "기존 프롬프트의 점수는 캐싱되어 있으므로 후보 프롬프트에 대해서만 LLM을 호출합니다."
         val_score_candidate = 0.0
         val_count = 0
+        validation_info = {}  # 현재 iteration의 validation 샘플 정보
 
         print(f"Validation 평가 중 (후보 프롬프트만 평가)... 총 {len(validation_dataset)}개 샘플")
 
@@ -925,6 +958,14 @@ def main():
                     score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0.0
                 else:
                     score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0.0
+
+                # Validation 샘플 정보 수집
+                validation_info[str(val_idx - 1)] = {
+                    "Q": val_question,
+                    "A": pred_cand,
+                    "GA": val_gt,
+                    "score": score_cand
+                }
 
                 val_score_candidate += score_cand
                 val_count += 1
@@ -970,9 +1011,13 @@ def main():
 
         iteration_avg_score = sum(successful_scores) / len(successful_scores) if successful_scores else None
 
+        # Validation 정보를 해당 iteration의 모든 로그에 추가
         for idx in range(iteration_log_start_idx, len(optimization_logs)):
             optimization_logs[idx]['dataset_size'] = batch_size
             optimization_logs[idx]['avg_total_score'] = iteration_avg_score
+            optimization_logs[idx]['validation_info'] = validation_info
+            optimization_logs[idx]['validation_accuracy'] = val_score_candidate
+            optimization_logs[idx]['validation_dataset_size'] = len(validation_dataset)
 
         # 마지막에 gradient 비우기
         optimizer.zero_grad()
