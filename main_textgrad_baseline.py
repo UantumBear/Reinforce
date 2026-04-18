@@ -177,9 +177,9 @@ def main():
     print(f"[✓] Test-time updates: {test_time_updates}번 (데이터셋: {EXPERIMENT_INS.default_dataset_name})")
     
     print_step("3. TextGrad 환경 설정 및 엔진 초기화")
-    # TextGrad baseline용 experiment_id 생성
+    # TextGrad experiment_id 생성
     current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
-    experiment_id = f"textgrad_baseline_{current_time}"
+    experiment_id = f"textgrad_{EXPERIMENT_INS.mode}_{current_time}"
     
     # ============================================================================
     # TextGrad 엔진 초기화: 2가지 역할로 나뉜 LLM
@@ -402,6 +402,7 @@ def main():
                     validation_dataset_size=log_data.get('validation_dataset_size'),
                     dataset_size=log_data.get('dataset_size'),
                     avg_total_score=log_data.get('avg_total_score'),
+                    dataset_nm=log_data.get('dataset_nm'),
                     optimizer_model_nm=log_data['optimizer_model_nm'],
                     optimizer_model_provider="azure",
                     tester_model_nm=log_data['tester_model_nm'],
@@ -567,7 +568,14 @@ def main():
 
         # DB 로그용 공통 필드 생성
         # episode 컬럼 = iteration 번호 (논문에 episode 개념 없음, DB 컬럼 재사용)
-        base_log = create_base_log(experiment_id, iteration, textgrad_backward_model_nm, textgrad_forward_model_nm, embedding_model_nm)
+        base_log = create_base_log(
+            experiment_id, 
+            iteration, 
+            textgrad_backward_model_nm, 
+            textgrad_forward_model_nm, 
+            embedding_model_nm,
+            dataset_nm=EXPERIMENT_INS.default_dataset_name
+        )
 
         iteration_log_start_idx = len(optimization_logs)
 
@@ -798,7 +806,11 @@ def main():
 
         # 3) 후보 프롬프트 생성 (optimizer.step() 전에 gradient 텍스트 백업)
         # system_prompt.get_gradient_text(): backward()에서 생성된 피드백 텍스트
-        prompt_feedback_text = system_prompt.get_gradient_text().strip() or "[N/A]"
+        prompt_feedback_text = EXPERIMENT_INS.extract_feedback_str(
+            system_prompt=system_prompt,
+            optimization_logs=None,
+            iteration_log_start_idx=None
+        )
 
         # ============================================================================
         # Optimizer Step: 평가자 LLM(backward_engine)이 새 프롬프트 생성
@@ -1038,5 +1050,5 @@ def main():
     print(f"Final optimized prompt: {system_prompt.value}")
 
 if __name__ == "__main__":
-    print_step("=== TextGrad Baseline 프롬프트 최적화 시작 ===")
+    print_step("=== TextGrad 프롬프트 최적화 시작 ===")
     main()
