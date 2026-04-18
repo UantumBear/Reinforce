@@ -8,6 +8,7 @@ Docstring for models.rl_optimization_log
 
 
 from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from datetime import datetime
 
@@ -33,6 +34,7 @@ class RlOptimizationLog(Base):
     # 실험 메타데이터
     dataset_size = Column(Integer, nullable=True)  # 실험에 사용된 데이터 개수
     avg_total_score = Column(Float, nullable=True)  # 해당 에피소드의 평균 점수
+    dataset_nm = Column(String(100), nullable=True)  # 데이터셋 이름 (예: openai/gsm8k, nasa/cmapss-fd001)
 
     optimizer_model_nm = Column(String(100), nullable=True)  # 최적화 담당 모델명 (예: gpt-5-nano)
     optimizer_model_provider = Column(String(50), nullable=True)  # 최적화 모델 제공사 (azure)
@@ -62,7 +64,17 @@ class RlOptimizationLog(Base):
     ragas_context_recall_score = Column(Float, nullable=True)
     
     # Accuracy 점수 (정확도, 0.0 ~ 1.0 범위)
-    accuracy = Column(Float, nullable=True) # Baseline 논문에서 Accuracy 라는 용어를 사용하여 비교 용도.
+    accuracy = Column(Float, nullable=True) # Train 샘플의 개별 정답 여부 (0 or 1)
+    
+    # Validation 관련 컬럼
+    validation_info = Column(JSONB, nullable=True)  # Validation 샘플들의 상세 정보 (JSON 형태)
+    validation_accuracy = Column(Float, nullable=True)  # Validation 데이터셋 전체의 평균 accuracy
+    validation_dataset_size = Column(Integer, nullable=True)  # Validation 데이터셋 샘플 개수
+    
+    # LLM 호출 카운트 (각 row 생성 시 실제 LLM 호출 횟수 추적)
+    forward_tester_llm_call_cnt = Column(Integer, default=0)  # Forward Model(답변 생성) LLM 호출 횟수
+    backward_judge_llm_call_cnt = Column(Integer, default=0)  # Backward Judge(평가) LLM 호출 횟수
+    backward_optimizer_llm_call_cnt = Column(Integer, default=0)  # Backward Optimizer(프롬프트 개선) LLM 호출 횟수
     
     # RAGAS 종합 평가 결과 (컬럼 생성하지 않았음)
     # ragas_is_faithful = Column(Boolean, nullable=True)
