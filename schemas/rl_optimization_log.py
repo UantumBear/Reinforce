@@ -34,6 +34,7 @@ class RlOptimizationLogSchema(BaseModel):
     # 실험 메타데이터
     dataset_size: Optional[int] = None
     avg_total_score: Optional[float] = None
+    dataset_nm: Optional[str] = None  # 데이터셋 이름
     
     # 모델 정보
     optimizer_model_nm: str
