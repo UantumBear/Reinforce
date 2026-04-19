@@ -97,7 +97,8 @@ from utils.environment.textgrad_log_builder import (
     create_success_log,
     create_error_log,
     extract_momentum_history,
-    build_tgd_optimizer_total_input
+    build_tgd_optimizer_total_input,
+    build_backward_judge_total_input,
 )
 from utils.log.console import print_step
 _print_elapsed("utils 모듈 완료")
@@ -252,10 +253,19 @@ def main():
     
     # requires_grad=True: optimizer가 이 프롬프트를 개선할 수 있도록 설정
     # role_description: backward_engine(평가자 LLM)이 피드백 생성 시 참고
+    
+    ##### 차별점 #####
+    # [Baseline] experiment_context = "" (실험 컨텍스트 미제공, 논문 재현)
+    # [Improve] experiment_context = get_gsm8k_experiment_context() (실험 목표 전달)
+    experiment_context = EXPERIMENT_INS.get_experiment_context()
+    ###################
+    
+    role_desc = f"system prompt to the language model\n{experiment_context}"
+    
     system_prompt = tg.Variable(
         initial_prompt, 
         requires_grad=True, 
-        role_description="system prompt to the language model"
+        role_description=role_desc
     )
 
     # [중요] BlackboxLLM: forward_engine(답변 생성자 LLM)을 감싼 wrapper
@@ -397,6 +407,9 @@ def main():
                     ragas_faithfulness_score=log_data.get('ragas_faithfulness_score'),
                     ragas_answer_relevancy_score=log_data.get('ragas_answer_relevancy_score'),
                     accuracy=log_data.get('accuracy'),
+                    forward_tester_llm_call_cnt=log_data.get('forward_tester_llm_call_cnt', 0),
+                    backward_judge_llm_call_cnt=log_data.get('backward_judge_llm_call_cnt', 0),
+                    backward_optimizer_llm_call_cnt=log_data.get('backward_optimizer_llm_call_cnt', 0),
                     validation_info=log_data.get('validation_info'),
                     validation_accuracy=log_data.get('validation_accuracy'),
                     validation_dataset_size=log_data.get('validation_dataset_size'),
@@ -410,6 +423,8 @@ def main():
                     embedding_model_nm=log_data.get('embedding_model_nm'),
                     optimizer_system_prompt=log_data.get('optimizer_system_prompt'),
                     optimizer_total_input=log_data.get('optimizer_total_input'),
+                    evaluation_instruction=log_data.get('evaluation_instruction'),
+                    backward_judge_total_input=log_data.get('backward_judge_total_input'),
                     # critical_review: 프롬프트 최적화 관점의 TextGrad feedback
                     critical_review=log_data['prompt_feedback'],
                     # full_analysis: 샘플 답안(예측 vs 정답) 관점의 비판 텍스트
@@ -672,6 +687,9 @@ def main():
                 # 데이터셋(gsm8k 등)과 모드(baseline/improve)에 따라 다른 평가 방식 사용
                 
                 # [조건부 처리] GSM8k baseline: StringBasedFunction (논문 방식) / 그 외: TextLoss (기존 방식)
+                # evaluation_instruction 초기화 (GSM8k StringBasedFunction 케이스에서는 None)
+                evaluation_instruction = None
+                
                 if is_gsm8k and EXPERIMENT_INS.mode == 'baseline':
                     # [논문 재현] StringBasedFunction 사용:
                     # - Evaluation Forward: Python 함수로 0/1 계산 (backward_engine 호출 X, 비용 절감!)
@@ -741,11 +759,21 @@ def main():
                         ragas_answer_relevancy_score = math.nan
                 
                 # Train 샘플 로그 저장
+                # backward_judge_total_input 생성 (evaluation_instruction이 있을 때만)
+                backward_judge_total_input = None
+                if evaluation_instruction is not None:
+                    backward_judge_total_input = build_backward_judge_total_input(
+                        evaluation_instruction=evaluation_instruction,
+                        prediction=prediction
+                    )
+                
                 optimization_logs.append(create_success_log(
                     base_log, system_prompt.value, question, context, ground_truth,
                     prediction, computed_loss.value, raw_similarity,
                     ragas_faithfulness_score, ragas_answer_relevancy_score,
-                    optimizer_system_prompt, accuracy
+                    optimizer_system_prompt, accuracy,
+                    evaluation_instruction=evaluation_instruction,
+                    backward_judge_total_input=backward_judge_total_input
                 ))
                 
             except Exception as sample_error:
@@ -806,11 +834,27 @@ def main():
 
         # 3) 후보 프롬프트 생성 (optimizer.step() 전에 gradient 텍스트 백업)
         # system_prompt.get_gradient_text(): backward()에서 생성된 피드백 텍스트
+        
+        ##################################### 차별점 #############################################
+        # [Baseline] 단순 gradient 텍스트만 사용 (샘플 비평 미사용)
+        # [Improve] 샘플 비평을 3계층 구조화 (optimization_logs 실제 전달)
+        
         prompt_feedback_text = EXPERIMENT_INS.extract_feedback_str(
             system_prompt=system_prompt,
-            optimization_logs=None,
+            optimization_logs=None,  # Baseline: 샘플 비평 미사용
             iteration_log_start_idx=None
         )
+        
+        # [Improve 모드 핵심] 계층형 피드백을 Optimizer에게 실제로 전달
+        # ★ TextGrad의 optimizer._update_prompt()는 variable.get_gradient_text()를 사용하는데,
+        #    이것은 variable.gradients의 value들을 읽어옵니다.
+        # ★ 따라서 gradient Variable들의 value를 계층형 피드백으로 교체해야 합니다!
+        # ★ Baseline 모드에서는 prompt_feedback_text == gradient_text 이므로 실질적 변화 없음
+        if EXPERIMENT_INS.mode == 'improve':
+            for grad_var in system_prompt.gradients:
+                grad_var.value = prompt_feedback_text
+            print(f"[Improve] 계층형 피드백 적용 완료: {len(system_prompt.gradients)}개 gradient 교체")
+        ##########################################################################################
 
         # ============================================================================
         # Optimizer Step: 평가자 LLM(backward_engine)이 새 프롬프트 생성

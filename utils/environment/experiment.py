@@ -23,7 +23,8 @@ from agent.prompts.baseline_prompt import (
 )
 from reward.gsm8k_objective_func import (
     get_gsm8k_baseline_objective_function,
-    get_gsm8k_improve_objective_function
+    get_gsm8k_improve_objective_function,
+    get_gsm8k_experiment_context,
 )
 
 
@@ -117,7 +118,7 @@ class TextGradExperiment:
             self.default_iterations = 12  # 논문 기준 총 iteration 횟수
             self.default_batch_size = 3
             self.default_total_sample_size = 200  # Train
-            self.default_validation_size = 20     # Validation (원래 300 → 속도 개선을 위해 20으로 축소)
+            self.default_validation_size = 3   # TODO Validation (논문 재현) : 300
             
         elif any(keyword in dataset_name_lower for keyword in ['object_counting', 'word_sorting', 'bbh']):
             # Object Counting & Word Sorting (Big-Bench Hard)
@@ -246,18 +247,53 @@ class TextGradExperiment:
         else:
             return DEFAULT_INIT_PROMPT
     
-    def get_objective_function(self, ground_truth: str) -> str:
+    def _build_hierarchical_evaluation_instruction(self, ground_truth: str, similarity_score: float | None = None) -> str:
+        """Improve 모드: 계층형 rubric (3-Layer 구조)로 답변 비평"""
+        similarity_score_text = "[N/A]"
+        if similarity_score is not None:
+            similarity_score_text = str(similarity_score)
+
+        return (
+            f"[Ground Truth]\n{ground_truth}\n\n"
+            "[Reference Similarity Score]\n"
+            f"- Gold answer와 현재 답변 간 semantic similarity 참고값: {similarity_score_text}\n"
+            "- 단, 이 값은 보조 지표이며 정답 일치 여부보다 우선하지 마세요.\n"
+            "[Layer 1: Fact Alignment]\n"
+            "- 정답 대비 사실 오류, 누락, 환각 가능성을 먼저 지적하세요.\n"
+            "[Layer 2: Context Grounding]\n"
+            "- 답변의 핵심 주장별로 문맥 근거 유무를 짚어주세요.\n"
+            "[Layer 3: Expression Quality]\n"
+            "- 간결성, 명확성, 논리 흐름 개선점을 제안하세요.\n"
+            "출력 형식: (1) 치명 오류 3개 이내 (2) 즉시 적용 가능한 개선 지시 3개"
+        )
+    
+    def _build_baseline_evaluation_instruction(self, ground_truth: str) -> str:
+        """Baseline 모드: 단순 4가지 기준 평가 (TextGrad 논문 방식)"""
+        return (
+            "You are a critical and rigorous evaluator for RAG systems. "
+            "Your task is to examine the predicted answer step-by-step and identify potential flaws.\n\n"
+            f"**Reference Answer:** {ground_truth}\n\n"
+            "**Evaluation Criteria:**\n"
+            "1. Does the prediction fully address the question based on the given context?\n"
+            "2. Are there any factual inaccuracies or hallucinations?\n"
+            "3. Is the reasoning clear and logically sound?\n"
+            "4. What specific improvements would make this answer better?\n\n"
+            "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
+        )
+    
+    def get_objective_function(self, ground_truth: str, similarity_score: float | None = None) -> str:
         """
         데이터셋과 실험 모드에 맞는 Objective Function(평가 지시문)을 반환한다.
         
         @논문 근거:
             TextGrad 논문에서는 데이터셋별로 다른 평가 전략을 사용합니다:
-            - GSM8k baseline: 실제 논문에서는 목적 함수를 사용하지 않음 (빈 문자열 반환)
+            - GSM8k baseline: StringBasedFunction 사용 (이 함수 호출 안 됨)
             - GSM8k improve: 커스텀 평가 지시문 사용
-            - 기타 데이터셋: 일반 RAG 평가 지시문
+            - 기타 데이터셋: baseline(단순 평가) vs improve(계층형 평가)
         
         @Args:
             ground_truth: 정답 (Reference Answer)
+            similarity_score: gold answer와 현재 예측 간 semantic similarity 참고값
         
         @Return:
             Objective Function 문자열 (TextLoss에 전달할 평가 지시문)
@@ -269,23 +305,107 @@ class TextGradExperiment:
             if self.mode == 'baseline':
                 return get_gsm8k_baseline_objective_function(ground_truth)
             elif self.mode == 'improve':
-                return get_gsm8k_improve_objective_function(ground_truth)
+                # Improve 모드에서만 similarity_score를 참고 지표로 전달
+                return get_gsm8k_improve_objective_function(ground_truth, similarity_score=similarity_score)
         
-        # 기타 데이터셋 (GPQA, MMLU, NASA 등) - 추후 확장
-        # TODO: 각 데이터셋별 objective function 구현
+        # 기타 데이터셋 (GPQA, MMLU, NASA 등)
         else:
-            # 임시: 일반 RAG 평가 지시문 (기본값)
+            if self.mode == 'baseline':
+                return self._build_baseline_evaluation_instruction(ground_truth)
+            elif self.mode == 'improve':
+                return self._build_hierarchical_evaluation_instruction(ground_truth, similarity_score=similarity_score)
+            else:
+                # fallback: baseline 방식
+                return self._build_baseline_evaluation_instruction(ground_truth)
+    
+    def get_experiment_context(self) -> str:
+        """
+        실험 컨텍스트 정보를 반환한다.
+        system_prompt의 role_description에 포함시켜 비평가와 optimizer가 실험 목표를 이해하도록 돕는다.
+        
+        @차별점:
+            - baseline: 빈 문자열 반환 (TextGrad 논문 재현, 실험 컨텍스트 미제공)
+            - improve: 데이터셋별 실험 컨텍스트 반환 (비평가/optimizer가 실험 목표 이해)
+        
+        @Return:
+            모드별, 데이터셋별 실험 컨텍스트 문자열
+        """
+        # Baseline 모드: 실험 컨텍스트를 제공하지 않음 (논문 재현)
+        if self.mode == 'baseline':
+            return ""
+        
+        # Improve 모드: 데이터셋별 실험 컨텍스트 제공
+        dataset_name_lower = self.default_dataset_name.lower()
+        
+        if 'gsm8k' in dataset_name_lower:
+            return get_gsm8k_experiment_context()
+        else:
+            # 기타 데이터셋은 기본 컨텍스트 반환
+            return ""
+    
+    def extract_feedback_str(self, system_prompt, optimization_logs: list = None, iteration_log_start_idx: int = None) -> str:
+        """
+        backward() 실행 후 생성된 프롬프트 피드백을 추출한다.
+        
+        @Args:
+            system_prompt: TextGrad Variable 객체 (system_prompt)
+            optimization_logs: DB 저장용 로그 버퍼 (improve 모드에서 샘플 비평 추출용)
+            iteration_log_start_idx: 현재 iteration 로그 시작 인덱스 (improve 모드용)
+        
+        @Return:
+            - baseline: 단순 gradient 텍스트
+            - improve: gradient + 샘플 비평을 3계층 구조화
+        """
+        if self.mode == 'baseline':
+            # Baseline: 단순 gradient 텍스트만 반환
+            return system_prompt.get_gradient_text().strip() or "[N/A]"
+        
+        elif self.mode == 'improve':
+            # Improve: 계층형 피드백 구조
+            gradient_text = system_prompt.get_gradient_text()
+            
+            # 샘플 비평 수집
+            sample_feedbacks: list[str] = []
+            if optimization_logs and iteration_log_start_idx is not None:
+                for row in optimization_logs[iteration_log_start_idx:]:
+                    raw_feedback = row.get('answer_feedback')
+                    if raw_feedback is None:
+                        continue
+                    # normalize_text_field 대신 간단한 정규화 (import 없이)
+                    normalized_feedback = str(raw_feedback).strip()
+                    if normalized_feedback:
+                        sample_feedbacks.append(normalized_feedback)
+                    if len(sample_feedbacks) >= 5:
+                        break
+            
+            if not sample_feedbacks:
+                sample_feedback_block = "- [N/A] 유효한 샘플 비평이 없어 gradient 중심으로 업데이트"
+            else:
+                # 차별점 #############################################################################################
+                # 각 샘플에 번호를 붙여서 구조화
+                formatted_samples = []
+                for idx, feedback in enumerate(sample_feedbacks, 1):
+                    formatted_samples.append(
+                        f"<{idx}번째 테스트>\n{feedback}\n</{idx}번째 테스트>"
+                    )
+                sample_feedback_block = "\n\n".join(formatted_samples)
+            
+            cleaned_gradient = gradient_text.strip() or "[N/A] TextGrad prompt feedback is empty."
+            
             return (
-                "You are a critical and rigorous evaluator for RAG systems. "
-                "Your task is to examine the predicted answer step-by-step and identify potential flaws.\n\n"
-                f"**Reference Answer:** {ground_truth}\n\n"
-                "**Evaluation Criteria:**\n"
-                "1. Does the prediction fully address the question based on the given context?\n"
-                "2. Are there any factual inaccuracies or hallucinations?\n"
-                "3. Is the reasoning clear and logically sound?\n"
-                "4. What specific improvements would make this answer better?\n\n"
-                "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
+                "[Layer A: TextGrad Gradient]\n"
+                f"{cleaned_gradient}\n\n"
+                "[Layer B: Sample Critiques]\n"
+                f"{sample_feedback_block}\n\n"
+                "[Layer C: Prompt Rewrite Directives]\n"
+                "- 사실 정확도와 정답 일치도를 최우선으로 유지\n"
+                "- 문맥에 없는 추론은 금지하고 근거 부족 시 명시\n"
+                "- 불필요한 장황함을 줄이고 핵심 답변을 우선 제시"
             )
+        
+        else:
+            # fallback: baseline 방식
+            return system_prompt.get_gradient_text().strip() or "[N/A]"
     
     
     # def build_evaluation_instruction(self, ground_truth: str) -> str:
