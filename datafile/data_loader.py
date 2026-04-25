@@ -22,6 +22,7 @@ def load_dataset(dataset_name=None, sample_size=None, random_seed=42, file_path=
         - "didi0di/klue-mrc-ko-rag-cot"
         - "nasa/cmapss-fd001" ~ "nasa/cmapss-fd004"
         - "openai/gsm8k"
+        - "telagentbench" / "skt/TelAgentBench"
     @param sample_size: 샘플링할 데이터 개수 (None이면 전체 사용)
     @param random_seed: 랜덤시드 (재현 가능한 실험을 위해 기본값 42)
     @param file_path: 커스텀 파일 경로 (dataset_name이 None일 때만 사용)
@@ -40,19 +41,21 @@ def load_dataset(dataset_name=None, sample_size=None, random_seed=42, file_path=
     elif dataset_name and dataset_name.startswith("openai/gsm8k"):
         # "openai/gsm8k-main" (TextGrad 논문 재현용)
         return load_gsm8k_dataset(sample_size=sample_size, random_seed=random_seed)
+    elif dataset_name and "telagentbench" in dataset_name.lower():
+        return load_telagentbench_dataset(dataset_name=dataset_name, sample_size=sample_size, random_seed=random_seed)
     
     # 2. dataset_name이 없거나 매칭되지 않으면 에러 발생 (실험 재현성을 위해 명시적 지정 필수)
     if dataset_name is None:
         if file_path is None:
             raise ValueError(
                 "dataset_name 또는 file_path를 지정해야 합니다. "
-                "사용 가능한 dataset_name: 'HJUNN/Finance-Law-merge-rag-dataset', 'didi0di/klue-mrc-ko-rag-cot', 'nasa/cmapss-fd001~fd004', 'openai/gsm8k'"
+                "사용 가능한 dataset_name: 'HJUNN/Finance-Law-merge-rag-dataset', 'didi0di/klue-mrc-ko-rag-cot', 'nasa/cmapss-fd001~fd004', 'openai/gsm8k', 'telagentbench'"
             )
     else:
         # dataset_name이 있지만 위에서 매칭되지 않은 경우
         raise ValueError(
             f"지원하지 않는 dataset_name: '{dataset_name}'. "
-            "사용 가능한 dataset_name: 'HJUNN/Finance-Law-merge-rag-dataset', 'didi0di/klue-mrc-ko-rag-cot', 'nasa/cmapss-fd001~fd004', 'openai/gsm8k'"
+            "사용 가능한 dataset_name: 'HJUNN/Finance-Law-merge-rag-dataset', 'didi0di/klue-mrc-ko-rag-cot', 'nasa/cmapss-fd001~fd004', 'openai/gsm8k', 'telagentbench'"
         )
     
     # 3. file_path 기반 처리 (dataset_name이 None이고 file_path가 있는 경우만)
@@ -363,6 +366,144 @@ def load_nasa_cmapss_dataset(dataset_name="nasa/cmapss-fd001", sample_size=None,
     random.shuffle(dataset)
     print(f"[Data Loader] 랜덤시드 {random_seed}로 데이터셋 셔플 완료")
     
+    return dataset
+
+
+def load_telagentbench_dataset(dataset_name="telagentbench", sample_size=None, random_seed=42):
+    """
+    SKT TelAgentBench CSV 데이터셋을 로드합니다.
+
+    @지원 스키마:
+        - TelAgent_Action + possible_answer: question/function/metadata + ground_truth 병합
+        - TelAgent_Plan: query / reference_information
+        - TelAgent_IF: input / expected_output / metadata
+
+    @주의:
+        dataset_name에 접미어를 붙여 로더를 선택할 수 있습니다.
+        - "telagentbench"(기본): Action + possible_answer 병합
+        - "telagentbench_if": TelAgent_IF
+        - "telagentbench_plan": TelAgent_Plan
+    """
+    dataset_name_lower = dataset_name.lower()
+    telagent_root = BASE_DIR / "datafile" / "original" / "skt" / "telagentbench" / "csv"
+
+    try:
+        if "_if" in dataset_name_lower or dataset_name_lower.endswith("/if"):
+            dataset_kind = "if"
+            file_path = telagent_root / "TelAgent_IF" / "telif_general_ko.csv"
+            if not os.path.exists(file_path):
+                print(f"[Warning] TelAgentBench 데이터셋을 찾을 수 없습니다: {file_path}")
+                return _get_hardcoded_examples()
+            df = pd.read_csv(file_path)
+
+        elif "_plan" in dataset_name_lower or dataset_name_lower.endswith("/plan"):
+            dataset_kind = "plan"
+            file_path = telagent_root / "TelAgent_Plan" / "validation_dataset_1111.csv"
+            if not os.path.exists(file_path):
+                print(f"[Warning] TelAgentBench 데이터셋을 찾을 수 없습니다: {file_path}")
+                return _get_hardcoded_examples()
+            df = pd.read_csv(file_path)
+
+        else:
+            # 기본값: Action 질문과 possible_answer 정답을 id 기준으로 병합
+            dataset_kind = "action_qa"
+            action_dir = telagent_root / "TelAgent_Action"
+            possible_dir = telagent_root / "possible_answer"
+
+            if not action_dir.exists() or not possible_dir.exists():
+                print(f"[Warning] TelAgentBench 병합용 폴더를 찾을 수 없습니다: {action_dir}, {possible_dir}")
+                return _get_hardcoded_examples()
+
+            merged_frames = []
+            action_files = sorted(action_dir.glob("*.csv"))
+            for action_file in action_files:
+                possible_file = possible_dir / action_file.name
+                if not possible_file.exists():
+                    continue
+
+                action_df = pd.read_csv(action_file)
+                possible_df = pd.read_csv(possible_file)
+
+                if "id" not in action_df.columns or "id" not in possible_df.columns:
+                    continue
+
+                gt_col = "ground_truth" if "ground_truth" in possible_df.columns else None
+                if gt_col is None:
+                    continue
+
+                merged_df = action_df.merge(
+                    possible_df[["id", gt_col]],
+                    on="id",
+                    how="inner"
+                )
+                merged_df["__source_file"] = action_file.name
+                merged_frames.append(merged_df)
+
+            if not merged_frames:
+                print("[Warning] TelAgentBench Action+possible_answer 병합 결과가 비어 있습니다.")
+                return _get_hardcoded_examples()
+
+            df = pd.concat(merged_frames, ignore_index=True)
+
+        print(f"[Data Loader] TelAgentBench({dataset_kind}) 데이터셋 로드 완료. 총 {len(df)}개 행.")
+        print(f"[CHECK] CSV 컬럼 목록: {df.columns.tolist()}")
+
+    except Exception as e:
+        print(f"[Error] TelAgentBench 데이터셋 로드 실패: {e}")
+        return _get_hardcoded_examples()
+
+    if sample_size:
+        df = df.sample(n=min(sample_size, len(df)), random_state=random_seed)
+        df = df.reset_index(drop=True)
+        print(f"[Data Loader] 랜덤시드 {random_seed}로 {len(df)}개 샘플 추출")
+
+    dataset = []
+    empty_answer_count = 0
+
+    for idx, row in df.iterrows():
+        if dataset_kind == "action_qa":
+            question = row.get("question", "")
+            function_desc = row.get("function", "")
+            metadata = row.get("metadata", "")
+            context = f"functions: {function_desc}\nmetadata: {metadata}"
+            answer = row.get("ground_truth", "")
+        elif dataset_kind == "plan":
+            question = row.get("query", "")
+            context = row.get("reference_information", "")
+            answer = row.get("answer", "") if "answer" in df.columns else ""
+        else:
+            question = row.get("input", "")
+            context = row.get("metadata", "")
+            answer = row.get("expected_output", "")
+
+        if pd.isna(question) or str(question).strip() == "":
+            continue
+
+        if pd.isna(context):
+            context = ""
+        if pd.isna(answer):
+            answer = ""
+
+        if str(answer).strip() == "":
+            empty_answer_count += 1
+
+        example = dspy.Example(
+            question=str(question),
+            context=str(context),
+            answer=str(answer),
+            dataset_kind=dataset_kind
+        ).with_inputs("question", "context")
+
+        dataset.append(example)
+
+    print(f"[Data Loader] TelAgentBench({dataset_kind}) 데이터셋 변환 완료: {len(dataset)}개 예제")
+    if empty_answer_count:
+        print(f"[Warning] answer가 비어 있는 샘플 {empty_answer_count}개가 포함되어 있습니다.")
+
+    random.seed(random_seed)
+    random.shuffle(dataset)
+    print(f"[Data Loader] 랜덤시드 {random_seed}로 데이터셋 셔플 완료")
+
     return dataset
 
 
