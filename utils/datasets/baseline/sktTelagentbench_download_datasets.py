@@ -21,6 +21,30 @@ from dotenv import load_dotenv
 from huggingface_hub import snapshot_download, login, HfApi
 
 
+def _load_json_or_jsonl(file_path: Path):
+    """일반 JSON 또는 JSONL 형식(.json 확장자 포함)을 안전하게 로드한다."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        raw_text = f.read().strip()
+
+    if not raw_text:
+        return []
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        # 일부 TelAgentBench 파일은 확장자는 .json이지만 실제 내용은 JSONL이다.
+        rows = []
+        for line_no, line in enumerate(raw_text.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as line_error:
+                raise ValueError(f"JSONL 파싱 실패 (line {line_no}): {line_error}") from line_error
+        return rows
+
+
 def download_and_parse_telagentbench():
     dataset_id = "skt/TelAgentBench"
     
@@ -96,9 +120,8 @@ def download_and_parse_telagentbench():
                     print(f"\n  [{category}] {file} 파싱 중...")
                     
                     try:
-                        # JSON 파일을 안전하게 로드
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
+                        # JSON/JSONL 파일을 안전하게 로드
+                        data = _load_json_or_jsonl(file_path)
                             
                         # 리스트 형태의 데이터인지 확인 후 DataFrame 생성
                         if isinstance(data, list):
