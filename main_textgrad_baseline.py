@@ -384,16 +384,18 @@ def main():
     #
     # ======================================================================
     _save_done = [False]  # 정상 저장 완료 여부. 리스트인 이유: 위 주석 참조.
+    _saved_count = [0]  # 이미 DB에 저장된 로그 수. 이터레이션마다 누적 저장 시 중복 방지용.
 
     def _do_db_save():
-        """DB 저장 - 정상 종료 및 비상 종료 시 공통으로 사용"""
-        if not optimization_logs:
-            print("[!] 저장할 로그가 없습니다.")
+        """DB 저장 - 신규 로그(_saved_count 이후)만 저장. 이터레이션 완료 시 및 종료 시 공통 사용."""
+        logs_to_save = optimization_logs[_saved_count[0]:]
+        if not logs_to_save:
+            print("[!] 저장할 신규 로그가 없습니다.")
             return
         session = None
         try:
             session = pg_client.get_session()
-            for log_data in optimization_logs:
+            for log_data in logs_to_save:
                 record = RlOptimizationLog(
                     experiment_id=log_data['experiment_id'],
                     episode=log_data['episode'],
@@ -435,7 +437,8 @@ def main():
                 )
                 session.add(record)
             session.commit()
-            print(f"[✓] DB 저장 완료: {len(optimization_logs)}건")
+            _saved_count[0] = len(optimization_logs)  # 저장 완료 후 카운터 갱신
+            print(f"[✓] DB 저장 완료: {len(logs_to_save)}건 (누계: {_saved_count[0]}건)")
         except Exception as e:
             print(f"[!] DB 저장 실패: {str(e)}")
             if session is not None:
@@ -474,7 +477,8 @@ def main():
             val_context = normalize_text_field(val_data.get('context', ''))
             val_question = normalize_text_field(val_data.get('question', ''))
             val_gt = normalize_text_field(val_data.get('answer', ''))
-            val_inputs = f"Question: {val_question}" if not val_context.strip() else f"Context: {val_context}\nQuestion: {val_question}"
+            val_system_persona = val_data.get('system_persona', '')
+            val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
@@ -513,7 +517,8 @@ def main():
             val_context = normalize_text_field(val_data.get('context', ''))
             val_question = normalize_text_field(val_data.get('question', ''))
             val_gt = normalize_text_field(val_data.get('answer', ''))
-            val_inputs = f"Question: {val_question}" if not val_context.strip() else f"Context: {val_context}\nQuestion: {val_question}"
+            val_system_persona = val_data.get('system_persona', '')
+            val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
@@ -544,7 +549,8 @@ def main():
             val_context = normalize_text_field(val_data.get('context', ''))
             val_question = normalize_text_field(val_data.get('question', ''))
             val_gt = normalize_text_field(val_data.get('answer', ''))
-            val_inputs = f"Question: {val_question}" if not val_context.strip() else f"Context: {val_context}\nQuestion: {val_question}"
+            val_system_persona = val_data.get('system_persona', '')
+            val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
@@ -594,6 +600,9 @@ def main():
 
         iteration_log_start_idx = len(optimization_logs)
 
+        # [논문 정렬] Iteration 시작 시 gradient 초기화
+        optimizer.zero_grad()
+
         # 1) Train: 배치 크기만큼 무작위 복원 추출
         batch = random.choices(train_pool, k=batch_size)  # 복원 추출
 
@@ -609,6 +618,7 @@ def main():
             context = normalize_text_field(data.get('context', ''))
             question = normalize_text_field(data.get('question', ''))
             ground_truth = normalize_text_field(data.get('answer', ''))
+            system_persona = data.get('system_persona', '') ## ADD
             
             if has_jailbreak_like_pattern(context) or has_jailbreak_like_pattern(question) or has_jailbreak_like_pattern(ground_truth):
                 # Jailbreak 패턴 감지 - 스킵
@@ -621,12 +631,10 @@ def main():
                 # [Forward Model 입력 구성]
                 # - GSM8k: context 없음 → "Question: ..."
                 # - NASA/KLUE: context 있음 → "Context: ...\nQuestion: ..."
+                # - TelAgentBench: [Persona & Rules] + [Available Tools] + [User Utterance]
                 # ※주의: 이것은 Forward Model에게 주는 입력입니다.
                 #   TextGrad Optimizer의 <CONTEXT> 태그(이전 피드백)와는 다릅니다.
-                if context.strip():
-                    inputs = f"Context: {context}\nQuestion: {question}"
-                else:
-                    inputs = f"Question: {question}"
+                inputs = EXPERIMENT_INS.build_forward_input(question, context, system_persona)
 
                 query_var = tg.Variable(inputs, role_description="RAG 입력", requires_grad=False)
 
@@ -987,15 +995,14 @@ def main():
             val_context = normalize_text_field(val_data.get('context', ''))
             val_question = normalize_text_field(val_data.get('question', ''))
             val_gt = normalize_text_field(val_data.get('answer', ''))
+            val_system_persona = val_data.get('system_persona', '')
 
             # - GSM8k: context 없음 → "Question: ..."
             # - NASA/KLUE: context 있음 → "Context: ...\nQuestion: ..."
+            # - TelAgentBench: [Persona & Rules] + [Available Tools] + [User Utterance]
             # ※주의: 이것은 Forward Model에게 주는 입력입니다.
             #   TextGrad Optimizer의 <CONTEXT> 태그(이전 피드백)와는 다릅니다.
-            if val_context.strip():
-                val_inputs = f"Context: {val_context}\nQuestion: {val_question}"
-            else:
-                val_inputs = f"Question: {val_question}"
+            val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
 
             try:
                 val_var_cand = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
@@ -1081,9 +1088,12 @@ def main():
         print(f"\nIteration {iteration} 완료: 평균 점수 = {iteration_avg_score}")
         print(f"현재 프롬프트: {system_prompt.value}")
 
+        # [즉시 저장] 이터레이션 1개 완료 즉시 DB에 저장 (중간 확인 / Ctrl+C 없이 보존)
+        _do_db_save()
+
     # ========== [TextGrad 논문 재현 루프 끝] ==========
 
-    # 5. DB 저장
+    # 5. DB 저장 (루프 정상 완료 후 - 마지막 이터레이션 이후 잔여 로그 방어적 저장)
     print_step("5. DB 로그 저장")
     _do_db_save()
     _save_done[0] = True  # atexit 비상 저장 비활성화 (정상 저장 완료)
