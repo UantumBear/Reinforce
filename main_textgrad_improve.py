@@ -132,6 +132,7 @@ _print_elapsed("나머지 utils 완료")
 # GSM8k 평가 함수
 _print_elapsed("Judge 함수들 import 시작")
 from metrics.judges.gsm8k_judge import parse_integer_answer
+from reward.hierarchical_evaluator import HierarchicalEvaluator
 
 # 기타 LLM get 함수들
 from metrics.judges.similarity_judge import create_similarity_judge 
@@ -226,14 +227,25 @@ def main():
     print(f"[DEBUG] Similarity Judge 초기화: {similarity_judge is not None}")
     print(f"[DEBUG] Embedding Model Name: {embedding_model_nm}")
     ragas_judge = create_ragas_judge()
+    # ----------------------------------------- 차별점 -----------------------------------------
+    # improve 모드 전용: backward Judge 피드백 출력 태그 검사기
+    feedback_structure_validator = HierarchicalEvaluator(judge_llm=None)
     _print_elapsed("Judge 모델 초기화 완료")
+    # ----------------------------------------- 차별점 -----------------------------------------
+    
     
     # 데이터셋 타입 감지 (accuracy 계산용)
     dataset_name_lower = EXPERIMENT_INS.default_dataset_name.lower()
     is_multiple_choice = any(keyword in dataset_name_lower for keyword in ['gpqa', 'mmlu', 'hqh'])
     is_gsm8k = 'gsm8k' in dataset_name_lower
+    is_object_counting = 'object_counting' in dataset_name_lower
+    is_numeric_exact_match_dataset = is_gsm8k or is_object_counting
     
-    print(f"[✓] 데이터셋 타입: multiple_choice={is_multiple_choice}, gsm8k={is_gsm8k}")
+    print(
+        f"[✓] 데이터셋 타입: multiple_choice={is_multiple_choice}, "
+        f"gsm8k={is_gsm8k}, object_counting={is_object_counting}, "
+        f"numeric_exact_match={is_numeric_exact_match_dataset}"
+    )
     
     # [연구 로드맵] 현재는 TextGrad Baseline 재현 단계
     # 향후 발전 방향: tg.TextLoss(평가 지시문 문자열) 대신
@@ -427,10 +439,10 @@ def main():
                     optimizer_total_input=log_data.get('optimizer_total_input'),
                     evaluation_instruction=log_data.get('evaluation_instruction'),
                     backward_judge_total_input=log_data.get('backward_judge_total_input'),
-                    # critical_review: 프롬프트 최적화 관점의 TextGrad feedback
-                    critical_review=log_data['prompt_feedback'],
-                    # full_analysis: 샘플 답안(예측 vs 정답) 관점의 비판 텍스트
-                    full_analysis=log_data['answer_feedback'],
+                    # critical_review: backward Judge가 생성한 샘플별 비평 원문
+                    critical_review=log_data['answer_feedback'],
+                    # full_analysis: optimizer에 투입된 프롬프트 최적화용 계층 피드백
+                    full_analysis=log_data['prompt_feedback'],
                     is_success=log_data['is_success'],
                     error_log=log_data['error_log'],
                     created_at=log_data['created_at']
@@ -471,7 +483,7 @@ def main():
     cached_val_count = 0
     initial_validation_info = {}  # 초기 프롬프트의 validation 샘플 정보
 
-    if is_gsm8k:
+    if is_numeric_exact_match_dataset:
         for val_idx, val_data in enumerate(validation_dataset, 1):
             # ※주의: val_context는 RAG 문서 자료이며, TextGrad의 <CONTEXT> 태그(이전 최적화 피드백)와 무관합니다.
             val_context = normalize_text_field(val_data.get('context', ''))
@@ -482,7 +494,7 @@ def main():
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
-                # GSM8k 정확도 계산: 숫자 추출 후 비교
+                # GSM8k/Object Counting 정확도 계산: 숫자 추출 후 비교
                 pred_num = parse_integer_answer(pred)
                 gt_num = parse_integer_answer(val_gt)
                 # 파싱 실패는 무조건 오답(0점) 처리
@@ -703,11 +715,12 @@ def main():
                     except Exception:
                         raw_similarity = math.nan
                 
-                # [조건부 처리] GSM8k baseline: StringBasedFunction (논문 방식) / 그 외: TextLoss (기존 방식)
-                # evaluation_instruction 초기화 (GSM8k StringBasedFunction 케이스에서는 None)
+                # [조건부 처리] GSM8k/Object Counting baseline: StringBasedFunction (논문 방식) / 그 외: TextLoss (기존 방식)
+                # evaluation_instruction 초기화 (StringBasedFunction 케이스에서는 None)
                 evaluation_instruction = None
+                feedback_tag_validation = None
                 
-                if is_gsm8k and EXPERIMENT_INS.mode == 'baseline':
+                if is_numeric_exact_match_dataset and EXPERIMENT_INS.mode == 'baseline':
                     # [논문 재현] StringBasedFunction 사용:
                     # - Evaluation Forward: Python 함수로 0/1 계산 (backward_engine 호출 X, 비용 절감!)
                     # - Evaluation Backward: backward_engine(평가자 LLM)으로 피드백 생성
@@ -734,7 +747,7 @@ def main():
                     # → float로 변환하여 DB 저장용 accuracy로 사용
                     try:
                         accuracy = float(computed_loss.value)
-                        print(f"[Accuracy - GSM8k] From StringBasedFunction: {accuracy}")
+                        print(f"[Accuracy - Numeric Exact Match] From StringBasedFunction: {accuracy}")
                     except (ValueError, TypeError):
                         accuracy = None
                         print(f"[Warning] Failed to convert loss to accuracy: {computed_loss.value}")
@@ -749,15 +762,51 @@ def main():
                     
                     ############################### 차별점 ###############################################
                     # [Improve] similarity_score를 참고 지표로 함께 전달하여 critic LLM이 보조 판단에 활용
+                    objective_accuracy = None
+                    if EXPERIMENT_INS.mode == 'improve' and is_numeric_exact_match_dataset:
+                        pred_num_for_objective = parse_integer_answer(prediction)
+                        gt_num_for_objective = parse_integer_answer(ground_truth)
+                        if pred_num_for_objective is not None and gt_num_for_objective is not None:
+                            objective_accuracy = 1.0 if pred_num_for_objective == gt_num_for_objective else 0.0
+
                     evaluation_instruction = EXPERIMENT_INS.get_objective_function(
                         ground_truth,
-                        similarity_score=raw_similarity
+                        similarity_score=raw_similarity,
+                        accuracy_score=objective_accuracy,
                     )
                     ######################################################################################
                     
                     loss = tg.TextLoss(evaluation_instruction)
                     computed_loss = loss(prediction_var)  # ← backward_engine(평가자 LLM)이 평가
                     losses.append(computed_loss)
+
+                    # improve 모드에서만: backward Judge 출력 태그 구조 검증
+                    if EXPERIMENT_INS.mode == 'improve':
+                        feedback_tag_validation = feedback_structure_validator.validate_feedback_output_tags(
+                            computed_loss.value
+                        )
+                        if not feedback_tag_validation.get("is_valid", False):
+                            print("⚠️ [Feedback Tag Validation] backward Judge 출력 형식이 요구 태그를 충족하지 않았습니다.")
+                            print(f"   - missing_open_tags: {feedback_tag_validation.get('missing_open_tags')}")
+                            print(f"   - missing_close_tags: {feedback_tag_validation.get('missing_close_tags')}")
+                            print(f"   - nested_errors: {feedback_tag_validation.get('nested_errors')}")
+
+                            fixed_feedback = feedback_structure_validator.fix_feedback_output_tags(
+                                computed_loss.value
+                            )
+                            if hasattr(computed_loss, "set_value"):
+                                computed_loss.set_value(fixed_feedback)
+                            else:
+                                computed_loss.value = fixed_feedback
+
+                            # 보정 후 재검증
+                            feedback_tag_validation = feedback_structure_validator.validate_feedback_output_tags(
+                                computed_loss.value
+                            )
+                            print(
+                                f"✅ [Feedback Tag Validation] 자동 보정 완료. "
+                                f"is_valid={feedback_tag_validation.get('is_valid')}"
+                            )
                 
                 ragas_faithfulness_score = None
                 ragas_answer_relevancy_score = None
@@ -782,6 +831,16 @@ def main():
                         evaluation_instruction=evaluation_instruction,
                         prediction=prediction
                     )
+                    if feedback_tag_validation is not None:
+                        backward_judge_total_input += (
+                            "\n\n=== FEEDBACK TAG VALIDATION (improve mode only) ===\n"
+                            f"is_valid: {feedback_tag_validation.get('is_valid')}\n"
+                            f"missing_open_tags: {feedback_tag_validation.get('missing_open_tags')}\n"
+                            f"missing_close_tags: {feedback_tag_validation.get('missing_close_tags')}\n"
+                            f"missing_pairs: {feedback_tag_validation.get('missing_pairs')}\n"
+                            f"nested_errors: {feedback_tag_validation.get('nested_errors')}\n"
+                            f"has_prefix_before_iteration: {feedback_tag_validation.get('has_prefix_before_iteration')}\n"
+                        )
                 
                 optimization_logs.append(create_success_log(
                     base_log, system_prompt.value, question, context, ground_truth,
@@ -1015,8 +1074,8 @@ def main():
                 val_var_cand = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred_cand = model(val_var_cand).value
 
-                if is_gsm8k:
-                    # GSM8k 정확도 계산: 숫자 추출 후 비교
+                if is_numeric_exact_match_dataset:
+                    # GSM8k/Object Counting 정확도 계산: 숫자 추출 후 비교
                     pred_num = parse_integer_answer(pred_cand)
                     gt_num = parse_integer_answer(val_gt)
                     # 파싱 실패는 무조건 오답(0점) 처리
@@ -1056,15 +1115,23 @@ def main():
         if hasattr(optimizer, "_update_momentum_storage"):
                 optimizer._update_momentum_storage(system_prompt, momentum_storage_idx=0)
 
-        # 후보 프롬프트가 현재보다 성능이 높을 때만 업데이트합니다.
-        if val_score_candidate > val_score_current:  
+        # [진단] 후보 프롬프트가 실제로 새로운 텍스트인지 확인
+        is_new_candidate = actual_candidate_text != original_prompt_value
+        if not is_new_candidate:
+            print(f"⚠️  [진단] Optimizer가 현재 프롬프트와 동일한 텍스트를 반환함 (regex 추출 실패 또는 LLM이 변경 없이 반환)")
+            print(f"       → validation 생략, 현재 프롬프트 유지")
+
+        # 후보 프롬프트가 현재보다 성능이 높거나 같을 때 업데이트 (>= 사용: validation_size가 작으면 동점도 허용)
+        # [주의] 실제로 새 텍스트가 추출된 경우에만 비교 (동일 텍스트면 비교 의미 없음)
+        if is_new_candidate and val_score_candidate >= val_score_current:
             system_prompt.set_value(actual_candidate_text)
             # [캐시 갱신] 채택된 후보 프롬프트의 점수를 다음 iteration의 현재 점수로 사용
             cached_val_score_current = val_score_candidate
             print(f"✅ Prompt accepted & Updated (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
         else:
             system_prompt.set_value(original_prompt_value)
-            print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f})")
+            if is_new_candidate:
+                print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f})")
 
         # 6) Iteration 로그 업데이트
         for idx in range(iteration_log_start_idx, len(optimization_logs)):
