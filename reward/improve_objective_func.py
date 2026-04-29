@@ -1,10 +1,17 @@
 def get_improve_objective_function(
         ground_truth: str,
     similarity_score: float | None = None,
-    accuracy_score: float | None = None) -> str:
+    accuracy_score: float | None = None,
+    student_raw_trajectory: str | None = None) -> str:
     """
     GSM8K 벤치마크용 개선된 Objective Function 프롬프트 생성 함수.
     Improve 모드에서만 similarity_score를 참고 지표로 전달한다.
+    
+    @Param:
+        ground_truth: 모범 답안
+        similarity_score: TesterLLM 답변과 모범 답안의 유사도 (0.0 ~ 1.0)
+        accuracy_score: 정답 일치 여부 (0 또는 1)
+        student_raw_trajectory: TesterLLM이 생성한 전체 사고 과정 (Chain of Thought 텍스트)
     """
     similarity_score_text = "[N/A]"
     if similarity_score is not None:
@@ -13,6 +20,15 @@ def get_improve_objective_function(
     accuracy_text = "[N/A]"
     if accuracy_score is not None:
         accuracy_text = "1" if float(accuracy_score) >= 1.0 else "0"
+    
+    # ##### 차별점 #####
+    # [Improve] TesterLLM의 전체 Chain of Thought 텍스트를 Judge 입력으로 제공
+    # - student_raw_trajectory가 None이면 "[미제공]" 표시
+    # - 제공되면 전체 사고 과정을 <실험 데이터>에 포함
+    student_trajectory_text = "[미제공]"
+    if student_raw_trajectory is not None:
+        student_trajectory_text = student_raw_trajectory
+    ###################
 
     return f"""
     <Environment 설명>
@@ -28,7 +44,8 @@ def get_improve_objective_function(
         </지표 설명>
 
         당신은 이 중 JudgeLLM 입니다. 
-        아래의 규칙을 참고하여, <출력형식> 내에 존재하는 각 판단 영역별 <review> 태그 내에 적절한 피드백을 생성하세요.
+        아래의 규칙과 실험 데이터(특히 TesterLLM의 전체 Chain of Thought)를 참고하여,
+        <출력형식> 내에 존재하는 각 판단 영역별 <review> 태그 내에 적절한 피드백을 생성하세요.
         
         <규칙>
             [프롬프트 최적화 실험 목표]
@@ -55,6 +72,10 @@ def get_improve_objective_function(
             모범 답안과 Forward Engine 답안 유사도:
             {similarity_score_text}
             위 값은, <출력형식> 섹션의 <similarity_score> 태그에 들어갈 값입니다.
+
+            TesterLLM의 전체 풀이 과정 (Chain of Thought):
+            {student_trajectory_text}
+            
         </실험 데이터>
 
         <출력형식>
