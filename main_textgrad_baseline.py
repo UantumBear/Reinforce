@@ -232,8 +232,14 @@ def main():
     dataset_name_lower = EXPERIMENT_INS.default_dataset_name.lower()
     is_multiple_choice = any(keyword in dataset_name_lower for keyword in ['gpqa', 'mmlu', 'hqh'])
     is_gsm8k = 'gsm8k' in dataset_name_lower
+    is_object_counting = 'object_counting' in dataset_name_lower
+    is_numeric_exact_match_dataset = is_gsm8k or is_object_counting
     
-    print(f"[✓] 데이터셋 타입: multiple_choice={is_multiple_choice}, gsm8k={is_gsm8k}")
+    print(
+        f"[✓] 데이터셋 타입: multiple_choice={is_multiple_choice}, "
+        f"gsm8k={is_gsm8k}, object_counting={is_object_counting}, "
+        f"numeric_exact_match={is_numeric_exact_match_dataset}"
+    )
     
     # [연구 로드맵] 현재는 TextGrad Baseline 재현 단계
     # 향후 발전 방향: tg.TextLoss(평가 지시문 문자열) 대신
@@ -415,7 +421,11 @@ def main():
                     validation_info=log_data.get('validation_info'),
                     validation_accuracy=log_data.get('validation_accuracy'),
                     validation_dataset_size=log_data.get('validation_dataset_size'),
+                    test_info=log_data.get('test_info'),
+                    test_accuracy=log_data.get('test_accuracy'),
+                    test_dataset_size=log_data.get('test_dataset_size'),
                     dataset_size=log_data.get('dataset_size'),
+                    train_batch_size=log_data.get('train_batch_size'),
                     avg_total_score=log_data.get('avg_total_score'),
                     dataset_nm=log_data.get('dataset_nm'),
                     optimizer_model_nm=log_data['optimizer_model_nm'],
@@ -427,10 +437,10 @@ def main():
                     optimizer_total_input=log_data.get('optimizer_total_input'),
                     evaluation_instruction=log_data.get('evaluation_instruction'),
                     backward_judge_total_input=log_data.get('backward_judge_total_input'),
-                    # critical_review: 프롬프트 최적화 관점의 TextGrad feedback
-                    critical_review=log_data['prompt_feedback'],
-                    # full_analysis: 샘플 답안(예측 vs 정답) 관점의 비판 텍스트
-                    full_analysis=log_data['answer_feedback'],
+                        # critical_review: backward Judge가 생성한 샘플별 비평 원문
+                        critical_review=log_data['answer_feedback'],
+                        # full_analysis: optimizer에 투입된 프롬프트 최적화용 계층 피드백
+                        full_analysis=log_data['prompt_feedback'],
                     is_success=log_data['is_success'],
                     error_log=log_data['error_log'],
                     created_at=log_data['created_at']
@@ -441,6 +451,43 @@ def main():
             print(f"[✓] DB 저장 완료: {len(logs_to_save)}건 (누계: {_saved_count[0]}건)")
         except Exception as e:
             print(f"[!] DB 저장 실패: {str(e)}")
+            if session is not None:
+                session.rollback()
+        finally:
+            if session is not None:
+                session.close()
+
+    def _update_test_summary_row(episode: int, test_info: dict, test_accuracy: float | None, test_dataset_size: int | None):
+        """이미 삽입된 test 요약 row(episode 단일 row)를 주기적으로 업데이트한다."""
+        session = None
+        try:
+            session = pg_client.get_session()
+            record = (
+                session.query(RlOptimizationLog)
+                .filter(
+                    RlOptimizationLog.experiment_id == experiment_id,
+                    RlOptimizationLog.episode == episode,
+                )
+                .order_by(RlOptimizationLog.id.desc())
+                .first()
+            )
+            if record is None:
+                print(f"[!] Test 요약 row 업데이트 실패: episode={episode} row를 찾지 못했습니다.")
+                return
+
+            record.test_info = test_info
+            record.test_accuracy = test_accuracy
+            record.test_dataset_size = test_dataset_size
+            record.accuracy = None  # accuracy는 train 샘플 컬럼이므로 test 요약에서는 미사용
+            record.validation_info = None
+            record.validation_accuracy = None
+            record.validation_dataset_size = None
+            record.dataset_size = len(train_pool)
+            record.train_batch_size = batch_size
+            record.avg_total_score = None
+            session.commit()
+        except Exception as e:
+            print(f"[!] Test 요약 row 업데이트 실패: {str(e)}")
             if session is not None:
                 session.rollback()
         finally:
@@ -471,7 +518,7 @@ def main():
     cached_val_count = 0
     initial_validation_info = {}  # 초기 프롬프트의 validation 샘플 정보
 
-    if is_gsm8k:
+    if is_numeric_exact_match_dataset:
         for val_idx, val_data in enumerate(validation_dataset, 1):
             # ※주의: val_context는 RAG 문서 자료이며, TextGrad의 <CONTEXT> 태그(이전 최적화 피드백)와 무관합니다.
             val_context = normalize_text_field(val_data.get('context', ''))
@@ -482,7 +529,7 @@ def main():
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
-                # GSM8k 정확도 계산: 숫자 추출 후 비교
+                # GSM8k/Object Counting 정확도 계산: 숫자 추출 후 비교
                 pred_num = parse_integer_answer(pred)
                 gt_num = parse_integer_answer(val_gt)
                 # 파싱 실패는 무조건 오답(0점) 처리
@@ -581,7 +628,114 @@ def main():
     print(f"[초기 캐싱] 완료: {cached_val_score_current:.4f} ({cached_val_count}개 평가)")
     print(f"[초기 캐싱] Validation 샘플 정보: {len(initial_validation_info)}개 수집")
 
+    # -----------------------------------------------------------------------
+    # [episode=0] 초기 프롬프트를 전체 Test Set으로 평가 (논문 Apple-to-Apple 비교용)
+    # 논문 기준: 동일한 Test Set(GSM8k 1,319개)으로 최적화 전/후 성능을 비교합니다.
+    # 최적화 루프(ep1~12)의 Validation Set(300개)과는 별개 평가입니다.
+    # -----------------------------------------------------------------------
+    print(f"\n[episode=0] 초기 프롬프트 Test Set 전체 평가 시작...")
+    test_dataset = EXPERIMENT_INS.load_test_data()
+
+    if test_dataset:
+        base_log_ep0 = create_base_log(
+            experiment_id, 0,
+            textgrad_backward_model_nm,
+            textgrad_forward_model_nm,
+            embedding_model_nm,
+            dataset_nm=EXPERIMENT_INS.default_dataset_name,
+        )
+        ep0_score = 0.0
+        ep0_count = 0
+        ep0_test_info = {}
+
+        ep0_summary_log = create_success_log(
+            base_log_ep0,
+            system_prompt.value,
+            question="[Test Summary] episode=0",
+            context="",
+            ground_truth="[N/A]",
+            prediction="[N/A]",
+            computed_loss_value="[N/A] 초기 Test 평가 요약 row (backward 없음)",
+            raw_similarity=None,
+            ragas_faithfulness_score=None,
+            ragas_answer_relevancy_score=None,
+            optimizer_system_prompt=optimizer_system_prompt,
+            accuracy=None,
+        )
+        ep0_summary_log['test_info'] = {}
+        ep0_summary_log['test_accuracy'] = None
+        ep0_summary_log['test_dataset_size'] = len(test_dataset)
+        ep0_summary_log['validation_info'] = None
+        ep0_summary_log['validation_accuracy'] = None
+        ep0_summary_log['validation_dataset_size'] = None
+        ep0_summary_log['dataset_size'] = len(train_pool)
+        ep0_summary_log['train_batch_size'] = batch_size
+        ep0_summary_log['avg_total_score'] = None
+        optimization_logs.append(ep0_summary_log)
+        _do_db_save()  # episode=0 summary row 최초 insert
+
+        for ep0_idx, ep0_data in enumerate(test_dataset, 1):
+            if ep0_idx % 50 == 0 or ep0_idx == 1:
+                print(f"  [episode=0] [{ep0_idx}/{len(test_dataset)}] 초기 프롬프트 Test 평가 중...")
+            ep0_context = normalize_text_field(ep0_data.get('context', ''))
+            ep0_question = normalize_text_field(ep0_data.get('question', ''))
+            ep0_gt = normalize_text_field(ep0_data.get('answer', ''))
+            ep0_persona = ep0_data.get('system_persona', '')
+            ep0_inputs = EXPERIMENT_INS.build_forward_input(ep0_question, ep0_context, ep0_persona)
+
+            try:
+                ep0_var = tg.Variable(ep0_inputs, role_description="Test input", requires_grad=False)
+                ep0_pred = model(ep0_var).value
+
+                if is_numeric_exact_match_dataset:
+                    pred_num = parse_integer_answer(ep0_pred)
+                    gt_num = parse_integer_answer(ep0_gt)
+                    ep0_score_sample = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
+                elif is_multiple_choice:
+                    ep0_score_sample = similarity_judge(ep0_gt, ep0_pred) if similarity_judge else 0.0
+                else:
+                    ep0_score_sample = similarity_judge(ep0_gt, ep0_pred) if similarity_judge else 0.0
+
+                ep0_score += ep0_score_sample
+                ep0_count += 1
+                ep0_test_info[str(ep0_idx - 1)] = {
+                    "Q": ep0_question, "A": ep0_pred, "GA": ep0_gt, "score": ep0_score_sample
+                }
+
+            except Exception as e:
+                root_error = extract_root_error_message(e)
+                ep0_test_info[str(ep0_idx - 1)] = {
+                    "Q": ep0_question,
+                    "A": "[ERROR]",
+                    "GA": ep0_gt,
+                    "score": None,
+                    "error": root_error,
+                }
+                continue
+
+            if ep0_idx % 100 == 0:
+                running_acc = ep0_score / ep0_count if ep0_count > 0 else 0.0
+                _update_test_summary_row(
+                    episode=0,
+                    test_info=ep0_test_info,
+                    test_accuracy=running_acc,
+                    test_dataset_size=len(test_dataset),
+                )
+                print(f"  [episode=0] 중간 저장 완료: {ep0_idx}/{len(test_dataset)} (acc={running_acc:.4f})")
+
+        ep0_accuracy = ep0_score / ep0_count if ep0_count > 0 else 0.0
+        print(f"[episode=0] 완료: Test Set 정확도 = {ep0_accuracy:.4f} ({ep0_count}/{len(test_dataset)}개 평가)")
+        _update_test_summary_row(
+            episode=0,
+            test_info=ep0_test_info,
+            test_accuracy=ep0_accuracy,
+            test_dataset_size=len(test_dataset),
+        )
+    else:
+        print(f"[episode=0] Test 데이터셋 없음, 건너뜁니다.")
+
     # ========== [TextGrad 논문 재현 루프 시작] ==========
+    random.seed(42)  # train batch 재현성 보장 (실험 간 동일한 batch 순서)
     for iteration in range(1, total_iterations + 1):
         print(f"\n{'='*80}")
         print(f"Iteration {iteration}/{total_iterations} 시작")
@@ -694,11 +848,11 @@ def main():
                 # [정의] evaluation_instruction: 평가자 LLM(backward_engine)에게 건네는 채점 가이드라인
                 # 데이터셋(gsm8k 등)과 모드(baseline/improve)에 따라 다른 평가 방식 사용
                 
-                # [조건부 처리] GSM8k baseline: StringBasedFunction (논문 방식) / 그 외: TextLoss (기존 방식)
-                # evaluation_instruction 초기화 (GSM8k StringBasedFunction 케이스에서는 None)
+                # [조건부 처리] GSM8k/Object Counting baseline: StringBasedFunction (논문 방식) / 그 외: TextLoss (기존 방식)
+                # evaluation_instruction 초기화 (StringBasedFunction 케이스에서는 None)
                 evaluation_instruction = None
                 
-                if is_gsm8k and EXPERIMENT_INS.mode == 'baseline':
+                if is_numeric_exact_match_dataset and EXPERIMENT_INS.mode == 'baseline':
                     # [논문 재현] StringBasedFunction 사용:
                     # - Evaluation Forward: Python 함수로 0/1 계산 (backward_engine 호출 X, 비용 절감!)
                     # - Evaluation Backward: backward_engine(평가자 LLM)으로 피드백 생성
@@ -725,7 +879,7 @@ def main():
                     # → float로 변환하여 DB 저장용 accuracy로 사용
                     try:
                         accuracy = float(computed_loss.value)
-                        print(f"[Accuracy - GSM8k] From StringBasedFunction: {accuracy}")
+                        print(f"[Accuracy - Numeric Exact Match] From StringBasedFunction: {accuracy}")
                     except (ValueError, TypeError):
                         accuracy = None
                         print(f"[Warning] Failed to convert loss to accuracy: {computed_loss.value}")
@@ -775,9 +929,17 @@ def main():
                         prediction=prediction
                     )
                 
+                # ##### 차별점 #####
+                # [Baseline + NumericExactMatch] StringBasedFunction → computed_loss.value = 0/1 (숫자)
+                # critical_review 컬럼은 "크리티컬한 리뷰" 의미이므로 숫자값 저장은 혼동 유발 → None 처리
+                # accuracy 컬럼으로 이미 0/1이 저장되므로 정보 손실 없음
+                # [그 외] TextLoss → computed_loss.value = LLM 평가 텍스트 → 그대로 저장
+                answer_feedback_value = None if (is_numeric_exact_match_dataset and EXPERIMENT_INS.mode == 'baseline') else computed_loss.value
+                ###################
+
                 optimization_logs.append(create_success_log(
                     base_log, system_prompt.value, question, context, ground_truth,
-                    prediction, computed_loss.value, raw_similarity,
+                    prediction, answer_feedback_value, raw_similarity,
                     ragas_faithfulness_score, ragas_answer_relevancy_score,
                     optimizer_system_prompt, accuracy,
                     evaluation_instruction=evaluation_instruction,
@@ -1005,11 +1167,12 @@ def main():
             val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
 
             try:
+                # TextGrad 에서 모든것은 Variable 이다. 
                 val_var_cand = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred_cand = model(val_var_cand).value
 
-                if is_gsm8k:
-                    # GSM8k 정확도 계산: 숫자 추출 후 비교
+                if is_numeric_exact_match_dataset:
+                    # GSM8k/Object Counting 정확도 계산: 숫자 추출 후 비교
                     pred_num = parse_integer_answer(pred_cand)
                     gt_num = parse_integer_answer(val_gt)
                     # 파싱 실패는 무조건 오답(0점) 처리
@@ -1049,15 +1212,23 @@ def main():
         if hasattr(optimizer, "_update_momentum_storage"):
                 optimizer._update_momentum_storage(system_prompt, momentum_storage_idx=0)
 
-        # 후보 프롬프트가 현재보다 성능이 높을 때만 업데이트합니다.
-        if val_score_candidate > val_score_current:  
+        # [진단] 후보 프롬프트가 실제로 새로운 텍스트인지 확인
+        is_new_candidate = actual_candidate_text != original_prompt_value
+        if not is_new_candidate:
+            print(f"⚠️  [진단] Optimizer가 현재 프롬프트와 동일한 텍스트를 반환함 (regex 추출 실패 또는 LLM이 변경 없이 반환)")
+            print(f"       → validation 생략, 현재 프롬프트 유지")
+
+        # 후보 프롬프트가 현재보다 성능이 높거나 같을 때 업데이트 (>= 사용: validation_size가 작으면 동점도 허용)
+        # [주의] 실제로 새 텍스트가 추출된 경우에만 비교 (동일 텍스트면 비교 의미 없음)
+        if is_new_candidate and val_score_candidate >= val_score_current:
             system_prompt.set_value(actual_candidate_text)
             # [캐시 갱신] 채택된 후보 프롬프트의 점수를 다음 iteration의 현재 점수로 사용
             cached_val_score_current = val_score_candidate
             print(f"✅ Prompt accepted & Updated (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
         else:
             system_prompt.set_value(original_prompt_value)
-            print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f})")
+            if is_new_candidate:
+                print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f})")
 
         # 6) Iteration 로그 업데이트
         for idx in range(iteration_log_start_idx, len(optimization_logs)):
@@ -1076,7 +1247,8 @@ def main():
 
         # Validation 정보를 해당 iteration의 모든 로그에 추가
         for idx in range(iteration_log_start_idx, len(optimization_logs)):
-            optimization_logs[idx]['dataset_size'] = batch_size
+            optimization_logs[idx]['dataset_size'] = len(train_pool)
+            optimization_logs[idx]['train_batch_size'] = batch_size
             optimization_logs[idx]['avg_total_score'] = iteration_avg_score
             optimization_logs[idx]['validation_info'] = validation_info
             optimization_logs[idx]['validation_accuracy'] = val_score_candidate
@@ -1092,6 +1264,122 @@ def main():
         _do_db_save()
 
     # ========== [TextGrad 논문 재현 루프 끝] ==========
+
+    # -----------------------------------------------------------------------
+    # [episode=total_iterations+1] 최종 프롬프트를 전체 Test Set으로 평가
+    # - 학습/최적화 단계가 아니므로 validation_* 필드는 사용하지 않습니다.
+    # - 논문과 동일한 Apple-to-Apple 비교를 위한 최종 성능 측정 단계입니다.
+    # -----------------------------------------------------------------------
+    final_episode = total_iterations + 1
+    print(f"\n[episode={final_episode}] 최종 프롬프트 Test Set 전체 평가 시작...")
+    final_test_dataset = EXPERIMENT_INS.load_test_data()
+
+    if final_test_dataset:
+        base_log_final = create_base_log(
+            experiment_id,
+            final_episode,
+            textgrad_backward_model_nm,
+            textgrad_forward_model_nm,
+            embedding_model_nm,
+            dataset_nm=EXPERIMENT_INS.default_dataset_name,
+        )
+        final_test_score = 0.0
+        final_test_count = 0
+        final_test_info = {}
+
+        final_summary_log = create_success_log(
+            base_log_final,
+            system_prompt.value,
+            question=f"[Test Summary] episode={final_episode}",
+            context="",
+            ground_truth="[N/A]",
+            prediction="[N/A]",
+            computed_loss_value="[N/A] 최종 Test 평가 요약 row (backward 없음)",
+            raw_similarity=None,
+            ragas_faithfulness_score=None,
+            ragas_answer_relevancy_score=None,
+            optimizer_system_prompt=optimizer_system_prompt,
+            accuracy=None,
+        )
+        final_summary_log['test_info'] = {}
+        final_summary_log['test_accuracy'] = None
+        final_summary_log['test_dataset_size'] = len(final_test_dataset)
+        final_summary_log['validation_info'] = None
+        final_summary_log['validation_accuracy'] = None
+        final_summary_log['validation_dataset_size'] = None
+        final_summary_log['dataset_size'] = len(train_pool)
+        final_summary_log['train_batch_size'] = batch_size
+        final_summary_log['avg_total_score'] = None
+        optimization_logs.append(final_summary_log)
+        _do_db_save()  # final summary row 최초 insert
+
+        for final_idx, final_data in enumerate(final_test_dataset, 1):
+            if final_idx % 50 == 0 or final_idx == 1:
+                print(f"  [episode={final_episode}] [{final_idx}/{len(final_test_dataset)}] 최종 프롬프트 Test 평가 중...")
+
+            final_context = normalize_text_field(final_data.get('context', ''))
+            final_question = normalize_text_field(final_data.get('question', ''))
+            final_gt = normalize_text_field(final_data.get('answer', ''))
+            final_persona = final_data.get('system_persona', '')
+            final_inputs = EXPERIMENT_INS.build_forward_input(final_question, final_context, final_persona)
+
+            try:
+                final_var = tg.Variable(final_inputs, role_description="Final test input", requires_grad=False)
+                final_pred = model(final_var).value
+
+                if is_numeric_exact_match_dataset:
+                    pred_num = parse_integer_answer(final_pred)
+                    gt_num = parse_integer_answer(final_gt)
+                    final_score_sample = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
+                elif is_multiple_choice:
+                    final_score_sample = similarity_judge(final_gt, final_pred) if similarity_judge else 0.0
+                else:
+                    final_score_sample = similarity_judge(final_gt, final_pred) if similarity_judge else 0.0
+
+                final_test_score += final_score_sample
+                final_test_count += 1
+                final_test_info[str(final_idx - 1)] = {
+                    "Q": final_question,
+                    "A": final_pred,
+                    "GA": final_gt,
+                    "score": final_score_sample,
+                }
+            except Exception as e:
+                root_error = extract_root_error_message(e)
+                final_test_info[str(final_idx - 1)] = {
+                    "Q": final_question,
+                    "A": "[ERROR]",
+                    "GA": final_gt,
+                    "score": None,
+                    "error": root_error,
+                }
+
+            if final_idx % 100 == 0:
+                running_acc = final_test_score / final_test_count if final_test_count > 0 else 0.0
+                _update_test_summary_row(
+                    episode=final_episode,
+                    test_info=final_test_info,
+                    test_accuracy=running_acc,
+                    test_dataset_size=len(final_test_dataset),
+                )
+                print(
+                    f"  [episode={final_episode}] 중간 저장 완료: "
+                    f"{final_idx}/{len(final_test_dataset)} (acc={running_acc:.4f})"
+                )
+
+        final_test_accuracy = final_test_score / final_test_count if final_test_count > 0 else 0.0
+        print(
+            f"[episode={final_episode}] 완료: 최종 Test Set 정확도 = "
+            f"{final_test_accuracy:.4f} ({final_test_count}/{len(final_test_dataset)}개 평가)"
+        )
+        _update_test_summary_row(
+            episode=final_episode,
+            test_info=final_test_info,
+            test_accuracy=final_test_accuracy,
+            test_dataset_size=len(final_test_dataset),
+        )
+    else:
+        print(f"[episode={final_episode}] Test 데이터셋 없음, 건너뜁니다.")
 
     # 5. DB 저장 (루프 정상 완료 후 - 마지막 이터레이션 이후 잔여 로그 방어적 저장)
     print_step("5. DB 로그 저장")

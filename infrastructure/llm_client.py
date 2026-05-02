@@ -10,6 +10,47 @@ from conf.config import Settings
 
 from infrastructure.embed_client import get_embedding_client
 
+
+def _create_textgrad_engine(provider: str, model_name: str):
+    """Create a TextGrad engine with compatibility fallback for newer OpenAI model names."""
+    import textgrad as tg
+
+    if provider == "openai":
+        # OpenAI 직접 사용
+        os.environ["OPENAI_API_KEY"] = Settings.OPENAI_API_KEY or ""
+        if Settings.OPENAI_ORG_ID:
+            os.environ["OPENAI_ORG_ID"] = Settings.OPENAI_ORG_ID
+
+        try:
+            return tg.get_engine(model_name)
+        except ValueError as e:
+            model_name_lower = (model_name or "").lower()
+            # textgrad==0.1.8 get_engine은 openai 모델명을 gpt-4/gpt-3.5만 허용한다.
+            # gpt-5/o-series는 ChatOpenAI를 직접 생성해서 우회한다.
+            if (
+                "not supported" in str(e).lower()
+                and (model_name_lower.startswith("gpt-5") or model_name_lower.startswith("o"))
+            ):
+                from textgrad.engine.openai import ChatOpenAI
+                print(f"[TextGrad Engine Fallback] ChatOpenAI 직접 생성: {model_name}")
+                return ChatOpenAI(model_string=model_name)
+            raise
+
+    if provider == "azure":
+        # Azure OpenAI 사용
+        os.environ["AZURE_OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
+        os.environ["AZURE_OPENAI_API_BASE"] = Settings.AZURE_OPENAI_ENDPOINT or ""
+        os.environ["AZURE_OPENAI_API_VERSION"] = Settings.AZURE_OPENAI_API_VERSION or ""
+        os.environ["OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
+        return tg.get_engine(f"azure-{model_name}")
+
+    if provider == "google":
+        # Google Gemini 사용
+        os.environ["GOOGLE_API_KEY"] = Settings.GOOGLE_API_KEY or ""
+        return tg.get_engine(model_name)
+
+    raise ValueError(f"지원되지 않는 TEXTGRAD_PROVIDER: {provider}. 'openai', 'azure', 'google' 중 선택하세요.")
+
 def setup_lms(verbose=True):
     """
     테스터 LLM 환경을 설정하고 전역 configure를 수행
@@ -97,42 +138,21 @@ def get_textgrad_backward_engine():
     Returns:
         tuple: (engine, model_name) - TextGrad 엔진과 실제 사용된 모델명
     """
-    import textgrad as tg
-
     Settings.setup()
-
-    backward_engine_model = (
-        Settings.TEXTGRAD_BACKWARD_ENGINE_MODEL or Settings.OPTIMIZER_MODEL
-        # or os.getenv("TEXTGRAD_TEACHER_MODEL")
-    )
-    if not backward_engine_model:
-        raise ValueError("TEXTGRAD_BACKWARD_ENGINE_MODEL 또는 Settings.OPTIMIZER_MODEL이 필요합니다.")
-
+    backward_engine_model = None
     provider = Settings.TEXTGRAD_PROVIDER
-    print(f"[TextGrad Backward Engine] Provider: {provider}, Model: {backward_engine_model}")
 
-    if provider == "openai":
-        # OpenAI 직접 사용
-        os.environ["OPENAI_API_KEY"] = Settings.OPENAI_API_KEY or ""
-        if Settings.OPENAI_ORG_ID:
-            os.environ["OPENAI_ORG_ID"] = Settings.OPENAI_ORG_ID
-        engine = tg.get_engine(backward_engine_model)
-        
-    elif provider == "azure":
-        # Azure OpenAI 사용
-        os.environ["AZURE_OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
-        os.environ["AZURE_OPENAI_API_BASE"] = Settings.AZURE_OPENAI_ENDPOINT or ""
-        os.environ["AZURE_OPENAI_API_VERSION"] = Settings.AZURE_OPENAI_API_VERSION or ""
-        os.environ["OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
-        engine = tg.get_engine(f"azure-{backward_engine_model}")
-        
-    elif provider == "google":
-        # Google Gemini 사용
-        os.environ["GOOGLE_API_KEY"] = Settings.GOOGLE_API_KEY or ""
-        engine = tg.get_engine(backward_engine_model)
-        
-    else:
-        raise ValueError(f"지원되지 않는 TEXTGRAD_PROVIDER: {provider}. 'openai', 'azure', 'google' 중 선택하세요.")
+    if provider == "azure":
+        backward_engine_model = (Settings.OPTIMIZER_MODEL)
+    elif provider == "openai":
+        backward_engine_model = (Settings.TEXTGRAD_BACKWARD_ENGINE_MODEL)
+
+    if not backward_engine_model:
+        raise ValueError("Settings.OPTIMIZER_MODEL이 필요합니다.")
+
+    
+    print(f"[TextGrad Backward Engine] Provider: {provider}, Model: {backward_engine_model}")
+    engine = _create_textgrad_engine(provider=provider, model_name=backward_engine_model)
     
     return engine, backward_engine_model
 
@@ -149,42 +169,20 @@ def get_textgrad_forward_engine():
     Returns:
         tuple: (engine, model_name) - TextGrad 엔진과 실제 사용된 모델명
     """
-    import textgrad as tg
-
     Settings.setup()
+    provider = Settings.TEXTGRAD_PROVIDER
+    forward_engine_model = None
 
-    forward_engine_model = (
-        Settings.TEXTGRAD_FORWARD_ENGINE_MODEL or Settings.TESTER_MODEL
-        # or os.getenv("TEXTGRAD_TESTER_MODEL")
-    )
+    if provider == "azure":
+        forward_engine_model = (Settings.TESTER_MODEL)
+    elif provider in "openai":
+        forward_engine_model = (Settings.TEXTGRAD_FORWARD_ENGINE_MODEL)
+
     if not forward_engine_model:
         raise ValueError("TEXTGRAD_FORWARD_ENGINE_MODEL 또는 Settings.TESTER_MODEL이 필요합니다.")
 
-    provider = Settings.TEXTGRAD_PROVIDER
     print(f"[TextGrad Forward Engine] Provider: {provider}, Model: {forward_engine_model}")
-
-    if provider == "openai":
-        # OpenAI 직접 사용
-        os.environ["OPENAI_API_KEY"] = Settings.OPENAI_API_KEY or ""
-        if Settings.OPENAI_ORG_ID:
-            os.environ["OPENAI_ORG_ID"] = Settings.OPENAI_ORG_ID
-        engine = tg.get_engine(forward_engine_model)
-        
-    elif provider == "azure":
-        # Azure OpenAI 사용
-        os.environ["AZURE_OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
-        os.environ["AZURE_OPENAI_API_BASE"] = Settings.AZURE_OPENAI_ENDPOINT or ""
-        os.environ["AZURE_OPENAI_API_VERSION"] = Settings.AZURE_OPENAI_API_VERSION or ""
-        os.environ["OPENAI_API_KEY"] = Settings.AZURE_OPENAI_API_KEY or ""
-        engine = tg.get_engine(f"azure-{forward_engine_model}")
-        
-    elif provider == "google":
-        # Google Gemini 사용
-        os.environ["GOOGLE_API_KEY"] = Settings.GOOGLE_API_KEY or ""
-        engine = tg.get_engine(forward_engine_model)
-        
-    else:
-        raise ValueError(f"지원되지 않는 TEXTGRAD_PROVIDER: {provider}. 'openai', 'azure', 'google' 중 선택하세요.")
+    engine = _create_textgrad_engine(provider=provider, model_name=forward_engine_model)
     
     return engine, forward_engine_model
 

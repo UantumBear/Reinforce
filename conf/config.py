@@ -41,6 +41,7 @@ class AppConfig:
     # - USE_AZURE와 독립적으로 동작 (예: DSPy는 Azure, TextGrad는 OpenAI 가능)
     # - openai: 일반 OpenAI API, azure: Azure OpenAI, google: Google Gemini
     TEXTGRAD_PROVIDER = None
+    RAGAS_PROVIDER = None
 
     # [현재 활성화된 모델 정보 (Agent는 이것만 참조하면 됨)]
     GENERATOR_MODEL = None  # 실제 사용할 모델명 (예: gpt-4, gemini-pro)
@@ -74,10 +75,6 @@ class AppConfig:
     GOOGLE_API_KEY = None
     # [EMBEDDING 모델 설정]
     LOCAL_EMBEDDING_MODEL_PATH = "model/embedding/ko-sroberta-multitask" # 이건 os 에서 읽지 않으므로 고정값으로 둠
-
-    # [TEXTGRAD BASELINE 설정]
-    TEXTGRAD_BACKWARD_ENGINE_MODEL = None
-    TEXTGRAD_FORWARD_ENGINE_MODEL = None
 
     # [Dataset 생성용 모델 설정]
     DATASET_GENERATOR_MODEL = None
@@ -114,38 +111,54 @@ class AppConfig:
         cls.USE_AZURE = str(use_azure_raw).lower() in ("true", "1", "yes", "on")
         
         # 2-1. TEXTGRAD_PROVIDER 확인 (openai/azure/google)
-        cls.TEXTGRAD_PROVIDER = os.getenv("TEXTGRAD_PROVIDER", "azure" if cls.USE_AZURE else "google").lower()
+        cls.TEXTGRAD_PROVIDER = os.getenv("TEXTGRAD_PROVIDER")
+        cls.RAGAS_PROVIDER = os.getenv("RAGAS_PROVIDER")
 
+        # --------------------------------------------------------------------------------------------
+        print(" --------------------- TEXTGRAD_PROVIDER 설정 로드 --------------------- ")
         # 3. 로컬 전용 키 파일 로드 시도 (key 폴더)
-        if cls.USE_AZURE:
+        if cls.TEXTGRAD_PROVIDER == "azure":
             azure_env_path = cls.PROJECT_ROOT / "key/azure.env"
             if azure_env_path.exists():
                 logger.info(f">>> [Local] Azure 키 파일을 로드합니다: {azure_env_path}")
                 load_dotenv(azure_env_path, override=True) # 로컬 파일이 우선
             else:
                 logger.info(">>> [Server/Env] Azure 키 파일이 없습니다. 시스템 환경변수를 확인합니다.")
-            
-            # 매핑 실행
             cls._configure_azure()
-            
-        else:
+
+        elif cls.TEXTGRAD_PROVIDER == "google":
             gemini_env_path = cls.PROJECT_ROOT / "key/gemini.env"
             if gemini_env_path.exists():
                 logger.info(f">>> [Local] Gemini 키 파일을 로드합니다: {gemini_env_path}")
                 load_dotenv(gemini_env_path, override=True)
             else:
                 logger.info(">>> [Server/Env] Gemini 키 파일이 없습니다. 시스템 환경변수를 확인합니다.")
-            
-            # 매핑 실행
             cls._configure_google()
         
-        # 3-1. TextGrad가 OpenAI를 사용하는 경우 추가 설정
-        if cls.TEXTGRAD_PROVIDER == "openai":
+        elif cls.TEXTGRAD_PROVIDER == "openai":
             openai_env_path = cls.PROJECT_ROOT / "key/openai.env"
             if openai_env_path.exists():
                 logger.info(f">>> [Local] OpenAI 키 파일을 로드합니다: {openai_env_path}")
                 load_dotenv(openai_env_path, override=True)
             cls._configure_openai()
+        else:
+            logger.info(" --------------------- TEXTGRAD_PROVIDER 설정을 찾을 수 없습니다. ---------------------")
+        
+        # --------------------------------------------------------------------------------------------
+        print(" --------------------- RAGAS_PROVIDER 설정 로드 --------------------- ")
+        if cls.RAGAS_PROVIDER == "azure":
+            if cls.TEXTGRAD_PROVIDER == "azure":
+                logger.info("RAGAS_PROVIDER가 TEXTGRAD_PROVIDER와 동일한 Azure로 설정이므로, 환경변수 로드를 생략합니다.")
+            else:
+                azure_env_path = cls.PROJECT_ROOT / "key/azure.env"
+                if azure_env_path.exists():
+                    logger.info(f">>> [Local] RAGAS용 Azure 키 파일을 로드합니다: {azure_env_path}")
+                    load_dotenv(azure_env_path, override=True) # RAGAS용으로도 동일한 파일에서 로드
+                else:
+                    logger.info(">>> [Server/Env] RAGAS용 Azure 키 파일이 없습니다. 시스템 환경변수를 확인합니다.")
+                cls._configure_azure()  # RAGAS도 Azure 설정 사용
+        else:
+            logger.info(" --------------------- RAGAS_PROVIDER 설정을 찾을 수 없습니다. --------------------- ")
 
         # 4. DB 설정 파일 로드 (공통)
         db_env_path = cls.PROJECT_ROOT / "key/db.env"
@@ -155,7 +168,7 @@ class AppConfig:
             cls._configure_database()
         else:
             logger.warning(">>> [Warning] DB 설정 파일이 없습니다. 시스템 환경변수를 확인합니다.")
-            cls._configure_database()  # 시스템 환경변수에서 로드 시도
+            cls._configure_database() 
 
         # 5. [최종 검증] 파일이 있든 없든, 결과적으로 API KEY가 세팅되었는가?
         if not cls.API_KEY:
@@ -176,6 +189,7 @@ class AppConfig:
         cls.AZURE_GPT5_NANO_DEPLOYMENT = os.getenv("AZURE_GPT5_NANO_DEPLOYMENT") 
         cls.AZURE_GPT5_MINI_DEPLOYMENT = os.getenv("AZURE_GPT5_MINI_DEPLOYMENT") 
         cls.AZURE_GPTO4_MINI_DEPLOYMENT = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")
+        cls.AZURE_O3_DEPLOYMENT = os.getenv("AZURE_O3_DEPLOYMENT")
 
         # 임베딩 모델 설정
         cls.AZURE_EMBEDDING3_SMALL_DEPLOYMENT = os.getenv("AZURE_EMBEDDING3_SMALL_DEPLOYMENT") # text-embedding-3-small
@@ -186,24 +200,14 @@ class AppConfig:
         cls.API_KEY = cls.AZURE_OPENAI_API_KEY
         cls.API_BASE = cls.AZURE_OPENAI_ENDPOINT
         cls.API_VERSION = cls.AZURE_OPENAI_API_VERSION
-        # cls.GENERATOR_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
-        cls.OPTIMIZER_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT         # cls.AZURE_GPT5_NANO_DEPLOYMENT  : 역할을 잘 이해하지 못함
-        # 최적화 모델, 현재는 가장 싼 nano 를 쓰고 있지만, 전체 설계 완료 후에는 일반 모델로 변경하기
-        cls.TESTER_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
-        # Tester 모델, 해당 모델은 따로 제약을 걸 이유가 없음, 아무 모델이나 사용하기.
-        # cls.RAGAS_CHAT_MODEL = os.getenv("AZURE_GPTO4_MINI_DEPLOYMENT")  # RAGAS 평가자 모델
+        
+        cls.TESTER_MODEL = cls.AZURE_GPT5_NANO_DEPLOYMENT
+        cls.OPTIMIZER_MODEL = cls.AZURE_O3_DEPLOYMENT  # JudgeLLM = OptimizerLLM = Backward Engine
+        # cls.AZURE_GPT5_NANO_DEPLOYMENT  : Optimizer 로 쓰면 역할을 잘 이해하지 못함
+        
+        # Tester 모델, 해당 모델은 따로 제약을 걸 이유가 없음, 아무 모델이나 빠르고 저렴한 모델 사용하기
         cls.RAGAS_CHAT_MODEL = cls.AZURE_GPT5_MINI_DEPLOYMENT
         # RAGAS 평가자 모델은 gpt-5-mini, gpt-5-nano 를 지원하지 않음 (temperature 파라미터 문제)
-
-
-        # TEXTGRAD_BASELINE 설정 (.env에서 우선 읽기, 없으면 Azure deployment 사용)
-        # [이전 방식 - 하드코딩] Azure deployment 직접 지정
-        # cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
-        # cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
-        
-        # [현재 방식] .env의 TEXTGRAD_*_MODEL 우선, 없으면 Azure deployment 사용
-        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
-        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")
 
         # DATASET 생성용 모델 설정
         cls.DATASET_GENERATOR_MODEL = os.getenv("AZURE_GPT5DOT4_MINI_DEPLOYMENT")  # 데이터셋 생성용 모델 (예: gpt-5-mini)
@@ -223,10 +227,6 @@ class AppConfig:
         cls.OPTIMIZER_MODEL = os.getenv("OPTIMIZER_MODEL", cls.GENERATOR_MODEL)
         cls.TESTER_MODEL = os.getenv("TESTER_MODEL", cls.GENERATOR_MODEL)
         
-        # TextGrad 모델 설정 (.env에서 우선 읽기, 없으면 기본값)
-        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_FORWARD_ENGINE_MODEL", "gemini-1.5-pro")
-        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_BACKWARD_ENGINE_MODEL", "gemini-1.5-pro")
-        
         if not cls.API_KEY:
             logger.warning("Google API Key가 설정되지 않았습니다.")
     
@@ -240,8 +240,8 @@ class AppConfig:
         # 대신 TEXTGRAD_*_MODEL 설정만 사용
         
         # TextGrad 모델 설정 (.env에서 우선 읽기, 없으면 기본값)
-        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_FORWARD_ENGINE_MODEL", "gpt-3.5-turbo-0125")
-        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_BACKWARD_ENGINE_MODEL", "gpt-3.5-turbo-0125")
+        cls.TEXTGRAD_FORWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_FORWARD_ENGINE_MODEL")
+        cls.TEXTGRAD_BACKWARD_ENGINE_MODEL = os.getenv("TEXTGRAD_BACKWARD_ENGINE_MODEL")
         
         if not cls.OPENAI_API_KEY:
             logger.warning("OpenAI API Key가 설정되지 않았습니다.")
