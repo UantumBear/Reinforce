@@ -2,6 +2,7 @@ CREATE TABLE rl_optimization_logs (
     id SERIAL PRIMARY KEY,
     experiment_id VARCHAR(50) NOT NULL,
     episode INTEGER NOT NULL,
+    iteration INTEGER,
     
     instruction TEXT,
     question TEXT,
@@ -32,14 +33,19 @@ CREATE TABLE rl_optimization_logs (
 ALTER TABLE rl_optimization_logs ADD COLUMN IF NOT EXISTS optimizer_system_prompt TEXT;
 ALTER TABLE rl_optimization_logs ADD COLUMN IF NOT EXISTS optimizer_total_input TEXT;
 
+-- iteration 컬럼 추가
+ALTER TABLE rl_optimization_logs ADD COLUMN IF NOT EXISTS iteration INTEGER;
+
 -- 성능 최적화를 위한 인덱스 생성
 CREATE INDEX idx_rl_optimization_logs_experiment_id ON rl_optimization_logs(experiment_id);
 CREATE INDEX idx_rl_optimization_logs_episode ON rl_optimization_logs(episode);
 CREATE INDEX idx_rl_optimization_logs_created_at ON rl_optimization_logs(created_at);
 CREATE INDEX idx_rl_optimization_logs_total_score ON rl_optimization_logs(total_score);
+CREATE INDEX idx_rl_optimization_logs_iteration ON rl_optimization_logs(iteration);
 
 -- 컬럼 추가: 데이터셋 크기와 평균 점수
 ALTER TABLE rl_optimization_logs ADD COLUMN dataset_size INTEGER;
+ALTER TABLE rl_optimization_logs ADD COLUMN train_batch_size INTEGER;
 ALTER TABLE rl_optimization_logs ADD COLUMN avg_total_score REAL;
 
 -- 컬럼 추가: 모델 정보
@@ -74,6 +80,35 @@ CREATE INDEX idx_rl_optimization_logs_ragas_answer_relevancy ON rl_optimization_
 -- 컬럼 추가: Accuracy 점수 (정확도, 0.0 ~ 1.0 범위)
 ALTER TABLE rl_optimization_logs ADD COLUMN accuracy REAL; -- REAL 은 부동소수점 타입
 
+-- 컬럼 추가: LLM 호출 카운트 (각 row 생성 시 실제 LLM 호출 횟수 추적)
+ALTER TABLE rl_optimization_logs ADD COLUMN forward_tester_llm_call_cnt INTEGER DEFAULT 0;
+ALTER TABLE rl_optimization_logs ADD COLUMN backward_judge_llm_call_cnt INTEGER DEFAULT 0;
+ALTER TABLE rl_optimization_logs ADD COLUMN backward_optimizer_llm_call_cnt INTEGER DEFAULT 0;
+
+-- 컬럼 추가: Backward Judge (비평가 엔진) 평가 관련 정보
+ALTER TABLE rl_optimization_logs ADD COLUMN evaluation_instruction TEXT; -- 비평가 엔진에게 전달하는 평가 기준 (우선순위, 고려사항 등)
+ALTER TABLE rl_optimization_logs ADD COLUMN backward_judge_total_input TEXT; -- 비평가 엔진에게 전달되는 전체 입력 내용
+
+-- 컬럼 추가: Validation 평가 정보 (JSON 형태로 저장)
+ALTER TABLE rl_optimization_logs ADD COLUMN validation_info JSONB;
+ALTER TABLE rl_optimization_logs ADD COLUMN validation_accuracy REAL; -- Validation 데이터셋 전체에 대한 평균 accuracy
+ALTER TABLE rl_optimization_logs ADD COLUMN validation_dataset_size INTEGER; -- Validation 데이터셋 샘플 개수
+
+-- 컬럼 추가: Test 평가 정보 (JSON 형태로 저장)
+ALTER TABLE rl_optimization_logs ADD COLUMN test_info JSONB;
+ALTER TABLE rl_optimization_logs ADD COLUMN test_accuracy REAL; -- Test 데이터셋 전체에 대한 평균 accuracy
+ALTER TABLE rl_optimization_logs ADD COLUMN test_dataset_size INTEGER; -- Test 데이터셋 샘플 개수
+
+-- JSONB 인덱스 추가 (성능 최적화 - GIN 인덱스)
+CREATE INDEX idx_rl_optimization_logs_validation_info ON rl_optimization_logs USING GIN (validation_info);
+CREATE INDEX idx_rl_optimization_logs_test_info ON rl_optimization_logs USING GIN (test_info);
+
+-- 컬럼 추가: 데이터셋 이름 (어떤 데이터셋으로 실험했는지 기록)
+ALTER TABLE rl_optimization_logs ADD COLUMN dataset_nm VARCHAR(100);
+
+
 -- RAGAS 종합 평가 결과 컬럼 추가  :: 이건 일단 추가하지 않고, 프론트 단에서 분리해서 보여주려고 함 (임계값 기준은 변경해봐야하니까)
 -- ALTER TABLE rl_optimization_logs ADD COLUMN ragas_is_faithful BOOLEAN;
 -- ALTER TABLE rl_optimization_logs ADD COLUMN ragas_is_relevant BOOLEAN;
+
+-- 코멘트는 comment_rl_optimization_log.sql 파일로 분리하여 관리 (컬럼 설명 추가)
