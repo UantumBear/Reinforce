@@ -154,6 +154,208 @@ from metrics.judges.gsm8k_judge import string_based_equality_fn
 _print_elapsed("모든 라이브러리 Import 완료")
 
 
+# ============================================================================
+# [CoT 추출] 모델별 Chain of Thought 처리 함수
+# ============================================================================
+
+
+def extract_reasoning_from_gpt5_response(
+    raw_response_text: str,
+    forward_engine=None,
+    query_text: str | None = None,
+    system_prompt_text: str | None = None
+) -> str:
+    """
+    GPT-5 모델의 응답에서 Chain of Thought (reasoning)을 추출한다.
+    
+    GPT-5는 OpenAI의 최신 모델로, 다음과 같은 기능을 지원할 수 있습니다:
+    - response_metadata에 reasoning 정보 포함
+    - 별도의 API 옵션으로 extended thinking 활용 가능
+    
+    @Param:
+        raw_response_text: 현재까지 수집한 응답 텍스트
+        forward_engine: 필요시 추가 API 호출용 LLM 객체
+        query_text: 필요시 재질의용 쿼리 텍스트
+        system_prompt_text: 필요시 재질의용 시스템 프롬프트
+    
+    @Return:
+        최종 응답 텍스트 (reasoning 정보 포함)
+    
+    @주요 기능 (향후 확장):
+        1. OpenAI API response_metadata에서 reasoning 필드 추출
+        2. extended thinking 모드 활용 시 thinking 콘텐츠 추출
+        3. 명시적 프롬프트로 chain-of-thought 생성 유도
+    """
+    
+    print(f"[CoT 추출 - GPT-5] Chain of Thought 추출 시작")
+    print(f"  - 응답 길이: {len(raw_response_text)} 글자")
+    
+    # [현재 구현]
+    # - API 레이어에서 raw_response_text로 전체 응답 받음
+    # - 내부적으로 reasoning 포함될 가능성 있음
+    # 
+    # [향후 구현 계획]
+    # 1. forward_engine.generate() 호출 시 extended_thinking=True 옵션 추가
+    # 2. response.response_metadata['reasoning'] 필드 추출
+    # 3. 또는 forward_engine에서 직접 reasoning 텍스트 접근
+    
+    # TODO: backward_engine (평가자 LLM)을 활용하여 reasoning 재구성 가능
+    # 예: "다음 응답의 사고 과정을 재구성하세요: {raw_response_text}"
+    
+    final_response = raw_response_text
+    print(f"[CoT 추출 - GPT-5] 최종 응답 길이: {len(final_response)} 글자")
+    
+    return final_response
+
+
+def extract_reasoning_from_gpt4_response(
+    raw_response_text: str,
+    forward_engine=None,
+    query_text: str | None = None,
+    system_prompt_text: str | None = None
+) -> str:
+    """
+    GPT-4 모델의 응답에서 Chain of Thought를 추출한다.
+    
+    GPT-4는 GPT-5에 비해 reasoning 기능이 제한적이므로,
+    다음 전략을 사용합니다:
+    - 명시적 프롬프트 지시 (앞서 baseline_prompt.py에서 추가함)
+    - 또는 backward_engine을 활용한 사후 reasoning 재구성
+    
+    @Param:
+        raw_response_text: 현재까지 수집한 응답 텍스트
+        forward_engine: 필요시 추가 API 호출용 LLM 객체
+        query_text: 필요시 재질의용 쿼리 텍스트
+        system_prompt_text: 필요시 재질의용 시스템 프롬프트
+    
+    @Return:
+        최종 응답 텍스트 (reasoning 정보 포함)
+    
+    @주요 특징:
+        1. baseline_prompt의 "Think step by step" 명령 사용
+        2. 초기 프롬프트에서 이미 reasoning 생성 유도
+        3. 추가 API 호출 최소화 (비용 효율)
+    """
+    
+    print(f"[CoT 추출 - GPT-4] Chain of Thought 추출 시작")
+    print(f"  - 응답 길이: {len(raw_response_text)} 글자")
+    
+    # [현재 구현]
+    # - baseline_prompt에서 "Think step by step" 이미 요청함
+    # - LLM이 자동으로 단계별 사고 과정 포함
+    # - raw_response_text에 이미 reasoning 포함될 가능성 높음
+    #
+    # [향후 개선]
+    # 1. 초기 프롬프트에 더 강력한 CoT 요청 추가
+    #    (예: "각 단계를 명확히 구분하여 작성하세요")
+    # 2. response 내에서 step marker (Step 1:, Step 2:, 등) 추출
+    # 3. 필요시 backward_engine으로 reasoning 재구성
+    
+    final_response = raw_response_text
+    print(f"[CoT 추출 - GPT-4] 최종 응답 길이: {len(final_response)} 글자")
+    
+    return final_response
+
+
+def extract_tester_response_with_cot(
+    forward_model_name: str,
+    raw_response_text: str,
+    forward_engine=None,
+    query_text: str | None = None,
+    system_prompt_text: str | None = None
+) -> str:
+    """
+    TesterLLM의 응답에서 Chain of Thought 텍스트를 추출한다.
+    모델별로 다른 처리 전략을 적용한다.
+    
+    @Param:
+        forward_model_name: forward_engine의 모델명 (e.g., "gpt-4o-mini", "gpt-3.5-turbo", "gpt-5" 등)
+        raw_response_text: 현재까지 수집한 응답 텍스트
+        forward_engine: 필요시 추가 API 호출용 LLM 객체
+        query_text: 필요시 재질의용 쿼리 텍스트
+        system_prompt_text: 필요시 재질의용 시스템 프롬프트
+    
+    @Return:
+        최종 응답 텍스트 (CoT 정보 포함 여부는 모델에 따라 다름)
+    
+    @모델별 분기 기준:
+        1. GPT-5: reasoning 필드 활용 (최신 기능) ← extract_reasoning_from_gpt5_response()
+        2. GPT-4: 명시적 프롬프트 + 단계별 사고 유도 ← extract_reasoning_from_gpt4_response()
+        3. GPT-3.5: 기본 응답 (향후 <thinking> 태그 지원)
+        4. Claude: 자체 reasoning 메커니즘 (향후 지원)
+    """
+    
+    model_lower = forward_model_name.lower()
+    print(f"[CoT 추출 DISPATCH] Forward Model: {forward_model_name}")
+    
+    # ===== GPT-5 감지 (최신 모델) =====
+    if 'gpt-5' in model_lower:
+        print(f"[CoT 추출] GPT-5 감지 ({forward_model_name}): GPT-5 전용 reasoning 추출")
+        return extract_reasoning_from_gpt5_response(
+            raw_response_text=raw_response_text,
+            forward_engine=forward_engine,
+            query_text=query_text,
+            system_prompt_text=system_prompt_text
+        )
+    
+    # ===== GPT-4 감지 (gpt-4, gpt-4o, gpt-4-turbo 등) =====
+    elif 'gpt-4' in model_lower:
+        print(f"[CoT 추출] GPT-4 감지 ({forward_model_name}): GPT-4 전용 reasoning 추출")
+        return extract_reasoning_from_gpt4_response(
+            raw_response_text=raw_response_text,
+            forward_engine=forward_engine,
+            query_text=query_text,
+            system_prompt_text=system_prompt_text
+        )
+    
+    # ===== GPT-3.5 감지 =====
+    elif 'gpt-3.5' in model_lower or 'gpt-35' in model_lower:
+        # ##### 차별점 #####
+        # [gpt-3.5-turbo] 현재: 아무 처리 없음
+        # [TODO] 향후: <thinking> 태그 프롬프트 추가
+        #   - 초기 프롬프트에 "반드시 <thinking>...</thinking> 태그로 생각 과정을 감싸서 작성하세요" 추가
+        #   - 그러면 LLM이 자동으로 thinking 블록을 생성하도록 유도 가능
+        ###################
+        print(f"[CoT 추출] GPT-3.5 감지 ({forward_model_name}): 기본 응답 사용 (향후 <thinking> 태그 처리 예정)")
+        return raw_response_text
+    
+    # ===== Claude 감지 (향후 확장) =====
+    elif 'claude' in model_lower:
+        print(f"[CoT 추출] Claude 감지 ({forward_model_name}): Claude 전용 처리 준비 중...")
+        # TODO: Claude의 thinking_blocks 또는 자체 reasoning 메커니즘 활용
+        return raw_response_text
+    
+    else:
+        # 기타 모델: 기본 응답 사용
+        print(f"[CoT 추출] ⚠️ 알 수 없는 모델 ({forward_model_name}): 기본 응답 사용")
+        return raw_response_text
+
+
+def build_train_output_format_instruction() -> str:
+    """Train 단계에서만 적용할 TesterLLM 출력 포맷 강제 지시문을 생성한다."""
+    return (
+        "\n\n[중요 출력 형식]\n"
+        "반드시 아래 XML 태그 형식을 정확히 지켜서 답변하세요.\n"
+        "1) 풀이/사고 과정은 <CoT>...</CoT> 태그 안에 작성\n"
+        "2) 최종 답변만 <Response>...</Response> 태그 안에 작성\n"
+        "3) <Response>에는 최종 답만 간결하게 작성\n"
+        "4) 반드시 <CoT>와 <Response> 둘 다 포함\n"
+    )
+
+
+def force_train_input_with_cot_response_tags(forward_input: str) -> str:
+    """기존 Forward 입력에 CoT/Response 출력 형식 요구사항을 덧붙인다."""
+    return f"{forward_input}{build_train_output_format_instruction()}"
+
+
+def extract_response_text_from_tester_output(raw_output_text: str) -> tuple[str, bool]:
+    """TesterLLM 원문에서 <Response> 태그 값을 추출하고, 없으면 원문을 그대로 반환한다."""
+    match = re.search(r"<Response>(.*?)</Response>", raw_output_text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip(), True
+    return raw_output_text.strip(), False
+
+
 def main():
     _print_elapsed("main() 함수 진입")
     
@@ -427,7 +629,11 @@ def main():
                     validation_info=log_data.get('validation_info'),
                     validation_accuracy=log_data.get('validation_accuracy'),
                     validation_dataset_size=log_data.get('validation_dataset_size'),
+                    test_info=log_data.get('test_info'),
+                    test_accuracy=log_data.get('test_accuracy'),
+                    test_dataset_size=log_data.get('test_dataset_size'),
                     dataset_size=log_data.get('dataset_size'),
+                    train_batch_size=log_data.get('train_batch_size'),
                     avg_total_score=log_data.get('avg_total_score'),
                     dataset_nm=log_data.get('dataset_nm'),
                     optimizer_model_nm=log_data['optimizer_model_nm'],
@@ -453,6 +659,43 @@ def main():
             print(f"[✓] DB 저장 완료: {len(logs_to_save)}건 (누계: {_saved_count[0]}건)")
         except Exception as e:
             print(f"[!] DB 저장 실패: {str(e)}")
+            if session is not None:
+                session.rollback()
+        finally:
+            if session is not None:
+                session.close()
+
+    def _update_test_summary_row(episode: int, test_info: dict, test_accuracy: float | None, test_dataset_size: int | None):
+        """이미 삽입된 test 요약 row(episode 단일 row)를 주기적으로 업데이트한다."""
+        session = None
+        try:
+            session = pg_client.get_session()
+            record = (
+                session.query(RlOptimizationLog)
+                .filter(
+                    RlOptimizationLog.experiment_id == experiment_id,
+                    RlOptimizationLog.episode == episode,
+                )
+                .order_by(RlOptimizationLog.id.desc())
+                .first()
+            )
+            if record is None:
+                print(f"[!] Test 요약 row 업데이트 실패: episode={episode} row를 찾지 못했습니다.")
+                return
+
+            record.test_info = test_info
+            record.test_accuracy = test_accuracy
+            record.test_dataset_size = test_dataset_size
+            record.accuracy = None  # accuracy는 train 샘플 컬럼이므로 test 요약에서는 미사용
+            record.validation_info = None
+            record.validation_accuracy = None
+            record.validation_dataset_size = None
+            record.dataset_size = len(train_pool)
+            record.train_batch_size = batch_size
+            record.avg_total_score = None
+            session.commit()
+        except Exception as e:
+            print(f"[!] Test 요약 row 업데이트 실패: {str(e)}")
             if session is not None:
                 session.rollback()
         finally:
@@ -493,9 +736,11 @@ def main():
             val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
+                # pred: 실제 생성한 응답 전체 , pred_for_eval : 생성된 응답 중 <Response> 태그 내 값
                 pred = model(val_var).value
+                pred_for_eval, _ = extract_response_text_from_tester_output(pred)
                 # GSM8k/Object Counting 정확도 계산: 숫자 추출 후 비교
-                pred_num = parse_integer_answer(pred)
+                pred_num = parse_integer_answer(pred_for_eval)
                 gt_num = parse_integer_answer(val_gt)
                 # 파싱 실패는 무조건 오답(0점) 처리
                 if pred_num is None or gt_num is None:
@@ -533,8 +778,9 @@ def main():
             val_inputs = EXPERIMENT_INS.build_forward_input(val_question, val_context, val_system_persona)
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
-                pred = model(val_var).value
-                score = similarity_judge(val_gt, pred) if similarity_judge else 0.0
+                pred = model(val_var).value # 실제 생성한 응답 전체
+                pred_for_eval, _ = extract_response_text_from_tester_output(pred)
+                score = similarity_judge(val_gt, pred_for_eval) if similarity_judge else 0.0
                 
                 # Validation 샘플 정보 수집
                 initial_validation_info[str(val_idx - 1)] = {
@@ -566,7 +812,8 @@ def main():
             try:
                 val_var = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred = model(val_var).value
-                score = similarity_judge(val_gt, pred) if similarity_judge else 0.0
+                pred_for_eval, _ = extract_response_text_from_tester_output(pred)
+                score = similarity_judge(val_gt, pred_for_eval) if similarity_judge else 0.0
                 
                 # Validation 샘플 정보 수집
                 initial_validation_info[str(val_idx - 1)] = {
@@ -593,7 +840,127 @@ def main():
     print(f"[초기 캐싱] 완료: {cached_val_score_current:.4f} ({cached_val_count}개 평가)")
     print(f"[초기 캐싱] Validation 샘플 정보: {len(initial_validation_info)}개 수집")
 
+    # -----------------------------------------------------------------------
+    # [episode=0] 초기 프롬프트를 전체 Test Set으로 평가 (논문 Apple-to-Apple 비교용)
+    # 논문 기준: 동일한 Test Set(GSM8k 1,319개)으로 최적화 전/후 성능을 비교합니다.
+    # 최적화 루프(ep1~12)의 Validation Set(300개)과는 별개 평가입니다.
+    # EXPERIMENT_INS.enable_test_evaluation == False 이면 이 블록 전체를 건너뜁니다.
+    # -----------------------------------------------------------------------
+    if not EXPERIMENT_INS.enable_test_evaluation:
+        print(f"\n[episode=0] Test 평가 비활성화 (enable_test_evaluation=False), 건너뜁니다.")
+        test_dataset = []
+    else:
+        print(f"\n[episode=0] 초기 프롬프트 Test Set 전체 평가 시작...")
+        test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
+
+    if test_dataset:
+        base_log_ep0 = create_base_log(
+            experiment_id, 0,
+            textgrad_backward_model_nm,
+            textgrad_forward_model_nm,
+            embedding_model_nm,
+            dataset_nm=EXPERIMENT_INS.default_dataset_name,
+        )
+        ep0_score = 0.0
+        ep0_count = 0
+        ep0_test_info = {}
+
+        ep0_summary_log = create_success_log(
+            base_log_ep0,
+            system_prompt.value,
+            question="[Test Summary] episode=0",
+            context="",
+            ground_truth="[N/A]",
+            prediction="[N/A]",
+            computed_loss_value="[N/A] 초기 Test 평가 요약 row (backward 없음)",
+            raw_similarity=None,
+            ragas_faithfulness_score=None,
+            ragas_answer_relevancy_score=None,
+            optimizer_system_prompt=optimizer_system_prompt,
+            accuracy=None,
+        )
+        ep0_summary_log['test_info'] = {}
+        ep0_summary_log['test_accuracy'] = None
+        ep0_summary_log['test_dataset_size'] = len(test_dataset)
+        ep0_summary_log['validation_info'] = None
+        ep0_summary_log['validation_accuracy'] = None
+        ep0_summary_log['validation_dataset_size'] = None
+        ep0_summary_log['dataset_size'] = len(train_pool)
+        ep0_summary_log['train_batch_size'] = batch_size
+        ep0_summary_log['avg_total_score'] = None
+        optimization_logs.append(ep0_summary_log)
+        _do_db_save()  # episode=0 summary row 최초 insert
+
+        for ep0_idx, ep0_data in enumerate(test_dataset, 1):
+            if ep0_idx % 50 == 0 or ep0_idx == 1:
+                print(f"  [episode=0] [{ep0_idx}/{len(test_dataset)}] 초기 프롬프트 Test 평가 중...")
+            ep0_context = normalize_text_field(ep0_data.get('context', ''))
+            ep0_question = normalize_text_field(ep0_data.get('question', ''))
+            ep0_gt = normalize_text_field(ep0_data.get('answer', ''))
+            ep0_persona = ep0_data.get('system_persona', '')
+            ep0_inputs = EXPERIMENT_INS.build_forward_input(ep0_question, ep0_context, ep0_persona)
+
+            try:
+                ep0_var = tg.Variable(ep0_inputs, role_description="Test input", requires_grad=False)
+                ep0_pred = model(ep0_var).value
+                ep0_pred_for_eval, _ = extract_response_text_from_tester_output(ep0_pred)
+
+                if is_numeric_exact_match_dataset:
+                    pred_num = parse_integer_answer(ep0_pred_for_eval)
+                    gt_num = parse_integer_answer(ep0_gt)
+                    ep0_score_sample = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
+                elif is_multiple_choice:
+                    ep0_score_sample = similarity_judge(ep0_gt, ep0_pred_for_eval) if similarity_judge else 0.0
+                else:
+                    ep0_score_sample = similarity_judge(ep0_gt, ep0_pred_for_eval) if similarity_judge else 0.0
+
+                ep0_score += ep0_score_sample
+                ep0_count += 1
+                ep0_test_info[str(ep0_idx - 1)] = {
+                    "Q": ep0_question, "A": ep0_pred, "GA": ep0_gt, "score": ep0_score_sample
+                }
+
+            except Exception as e:
+                root_error = extract_root_error_message(e)
+                ep0_test_info[str(ep0_idx - 1)] = {
+                    "Q": ep0_question,
+                    "A": "[ERROR]",
+                    "GA": ep0_gt,
+                    "score": None,
+                    "error": root_error,
+                }
+                continue
+
+            if ep0_idx % 100 == 0:
+                running_acc = ep0_score / ep0_count if ep0_count > 0 else 0.0
+                _update_test_summary_row(
+                    episode=0,
+                    test_info=ep0_test_info,
+                    test_accuracy=running_acc,
+                    test_dataset_size=len(test_dataset),
+                )
+                print(f"  [episode=0] 중간 저장 완료: {ep0_idx}/{len(test_dataset)} (acc={running_acc:.4f})")
+
+        ep0_accuracy = ep0_score / ep0_count if ep0_count > 0 else 0.0
+        print(f"[episode=0] 완료: Test Set 정확도 = {ep0_accuracy:.4f} ({ep0_count}/{len(test_dataset)}개 평가)")
+        _update_test_summary_row(
+            episode=0,
+            test_info=ep0_test_info,
+            test_accuracy=ep0_accuracy,
+            test_dataset_size=len(test_dataset),
+        )
+    else:  # test_dataset 없음 (enable_test_evaluation=True 인데 데이터 없는 경우)
+        print(f"[episode=0] Test 데이터셋 없음, 건너뜁니다.")
+
     # ========== [TextGrad 논문 재현 루프 시작] ==========
+    # ##### 차별점 #####
+    # [Improve] 이전 iteration에서 후보 프롬프트가 거절된 경우, 해당 정보를
+    #           다음 iteration의 JudgeLLM evaluation instruction에 주입한다.
+    #           거절 → XML 문자열 저장, 채택 → 빈 문자열 리셋
+    previous_rejection_info_str = ""  # iteration 간 유지되는 거절 컨텍스트
+    ###################
+
+    random.seed(42)  # train batch 재현성 보장 (실험 간 동일한 batch 순서)
     for iteration in range(1, total_iterations + 1):
         print(f"\n{'='*80}")
         print(f"Iteration {iteration}/{total_iterations} 시작")
@@ -646,7 +1013,13 @@ def main():
                 # - TelAgentBench: [Persona & Rules] + [Available Tools] + [User Utterance]
                 # ※주의: 이것은 Forward Model에게 주는 입력입니다.
                 #   TextGrad Optimizer의 <CONTEXT> 태그(이전 피드백)와는 다릅니다.
-                inputs = EXPERIMENT_INS.build_forward_input(question, context, system_persona)
+                raw_inputs = EXPERIMENT_INS.build_forward_input(question, context, system_persona)
+
+                ##### 차별점 #####
+                # [Baseline] Forward 입력 원문 사용
+                # [Improve] Train 단계에서 CoT/Response 태그 형식을 강제
+                inputs = force_train_input_with_cot_response_tags(raw_inputs)
+                ###################
 
                 query_var = tg.Variable(inputs, role_description="RAG 입력", requires_grad=False)
 
@@ -671,11 +1044,13 @@ def main():
                         if update_idx == 0:
                             first_prediction_var = pred_var
 
-                        choice = extract_choice_from_answer(pred_text)
+                        pred_text_for_eval, _ = extract_response_text_from_tester_output(pred_text)
+                        choice = extract_choice_from_answer(pred_text_for_eval)
                         test_time_choices.append(choice)
 
                     prediction_var = first_prediction_var
                     prediction = test_time_predictions[0]
+                    prediction_for_eval, _ = extract_response_text_from_tester_output(prediction)
 
                     # Majority voting으로 최종 답 선택
                     final_choice = majority_vote(test_time_choices)
@@ -699,6 +1074,27 @@ def main():
                     prediction_var = model(query_var)  # ← forward_engine(답변 생성자 LLM) 호출!
                     prediction = prediction_var.value
                     
+                    # ##### 차별점 #####
+                    # [모델별 CoT 처리] 모델에 따라 Chain of Thought 추출 방식 다름
+                    # - gpt-3.5-turbo: 기본 응답만 사용 (향후 <thinking> 태그 처리 예정)
+                    # - gpt-4 이상: reasoning 필드 활용 (향후 구현)
+                    tester_llm_full_response_raw = extract_tester_response_with_cot(
+                        forward_model_name=textgrad_forward_model_nm,
+                        raw_response_text=prediction,
+                        forward_engine=forward_engine,
+                        query_text=query_var.value,
+                        system_prompt_text=system_prompt.value
+                    )
+
+                    prediction_for_eval, has_response_tag = extract_response_text_from_tester_output(
+                        tester_llm_full_response_raw
+                    )
+                    if has_response_tag:
+                        print(f"[Response 추출] <Response> 태그 값 사용 (길이: {len(prediction_for_eval)})")
+                    else:
+                        print("[Response 추출] <Response> 태그 미검출 - 원문 전체를 평가값으로 사용")
+                    ###################
+                    
                     # ★ accuracy는 StringBasedFunction 결과를 변환하여 사용 (아래에서 설정)
                     accuracy = None
                 
@@ -710,7 +1106,7 @@ def main():
                 raw_similarity = None
                 if similarity_judge is not None:
                     try:
-                        raw_similarity = similarity_judge(ground_truth, prediction)
+                        raw_similarity = similarity_judge(ground_truth, prediction_for_eval)
                         print(f"[Debug] Raw similarity score: {raw_similarity}")
                     except Exception:
                         raw_similarity = math.nan
@@ -762,17 +1158,35 @@ def main():
                     
                     ############################### 차별점 ###############################################
                     # [Improve] similarity_score를 참고 지표로 함께 전달하여 critic LLM이 보조 판단에 활용
+                    # [Improve] TesterLLM의 전체 Chain of Thought 텍스트를 prediction 파라미터로 전달
                     objective_accuracy = None
+                    # objective_accuracy : 정답 일치 여부를 수치화해서 judge 입력과 Train accuracy 로그 저장 둘 다에 재사용하는 변수
+
                     if EXPERIMENT_INS.mode == 'improve' and is_numeric_exact_match_dataset:
-                        pred_num_for_objective = parse_integer_answer(prediction)
+                        pred_num_for_objective = parse_integer_answer(prediction_for_eval)
                         gt_num_for_objective = parse_integer_answer(ground_truth)
                         if pred_num_for_objective is not None and gt_num_for_objective is not None:
                             objective_accuracy = 1.0 if pred_num_for_objective == gt_num_for_objective else 0.0
+
+                    # [Improve] TextLoss 경로에서도 Train accuracy를 로그에 남기기 위해 동기화
+                    # - Numeric exact match 데이터셋(GSM8k 등): 0.0 / 1.0
+                    # - 파싱 실패 또는 비수치 데이터셋: None 유지
+                    accuracy = objective_accuracy
+
+                    # ✅ TesterLLM의 전체 생각 과정(Chain of Thought) 추출
+                    # ##### 차별점 #####
+                    # [모델별 처리] 앞에서 extract_tester_response_with_cot로 이미 처리됨
+                    # - gpt-3.5-turbo: 기본 응답만 사용
+                    # - gpt-4 이상: reasoning 필드 활용 (향후 구현)
+                    tester_llm_full_response = tester_llm_full_response_raw
+                    ###################
 
                     evaluation_instruction = EXPERIMENT_INS.get_objective_function(
                         ground_truth,
                         similarity_score=raw_similarity,
                         accuracy_score=objective_accuracy,
+                        prediction=tester_llm_full_response,
+                        previous_rejection_context=previous_rejection_info_str,
                     )
                     ######################################################################################
                     
@@ -1073,10 +1487,11 @@ def main():
             try:
                 val_var_cand = tg.Variable(val_inputs, role_description="Validation input", requires_grad=False)
                 pred_cand = model(val_var_cand).value
+                pred_cand_for_eval, _ = extract_response_text_from_tester_output(pred_cand)
 
                 if is_numeric_exact_match_dataset:
                     # GSM8k/Object Counting 정확도 계산: 숫자 추출 후 비교
-                    pred_num = parse_integer_answer(pred_cand)
+                    pred_num = parse_integer_answer(pred_cand_for_eval)
                     gt_num = parse_integer_answer(val_gt)
                     # 파싱 실패는 무조건 오답(0점) 처리
                     if pred_num is None or gt_num is None:
@@ -1084,9 +1499,9 @@ def main():
                     else:
                         score_cand = 1.0 if pred_num == gt_num else 0.0
                 elif is_multiple_choice:
-                    score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0.0
+                    score_cand = similarity_judge(val_gt, pred_cand_for_eval) if similarity_judge else 0.0
                 else:
-                    score_cand = similarity_judge(val_gt, pred_cand) if similarity_judge else 0.0
+                    score_cand = similarity_judge(val_gt, pred_cand_for_eval) if similarity_judge else 0.0
 
                 # Validation 샘플 정보 수집
                 validation_info[str(val_idx - 1)] = {
@@ -1123,15 +1538,54 @@ def main():
 
         # 후보 프롬프트가 현재보다 성능이 높거나 같을 때 업데이트 (>= 사용: validation_size가 작으면 동점도 허용)
         # [주의] 실제로 새 텍스트가 추출된 경우에만 비교 (동일 텍스트면 비교 의미 없음)
-        if is_new_candidate and val_score_candidate >= val_score_current:
+
+        ##### 차별점 #####
+        # [Baseline] val_score_candidate >= val_score_current (동점 이상만 채택)
+        # [Improve]  val_score_candidate >= val_score_current - 0.05 (0.05 이내 하락도 허용)
+        #            → validation 수를 줄였을 때 샘플 노이즈 보완 목적
+        ACCEPTANCE_TOLERANCE = 0.05
+
+        # 후보 프롬프트 비교 정보 - 다음 iteration의 backward JudgeLLM에게 컨텍스트로 전달
+        # STEP_BEFORE: 이번 iteration 시작 시점의 현재 프롬프트 (채택 전)
+        # STEP_NOW: optimizer가 생성한 후보 프롬프트
+        # STEP_BETWEEN_DIFF: validation 점수 차이 (양수=개선, 음수=하락)
+        score_diff = val_score_candidate - val_score_current
+        CANDIDATE_NON_EXCEPT_INFO = {
+            "STEP_BEFORE_SYSTEM_PROMPT": original_prompt_value,
+            "STEP_NOW_SYSTEM_PROMPT": actual_candidate_text,
+            "STEP_BETWEEN_DIFF": f"{score_diff:+.4f} (before={val_score_current:.4f}, after={val_score_candidate:.4f})",
+            "MESSAGE": "후보 프롬프트의 성능이 허용 범위 오차보다 더 떨어집니다. 해당 두 프롬프트를 비교하여 JudgeLLM의 비평 작성이 필요합니다."
+        }
+        ###################
+
+        if is_new_candidate and score_diff >= -ACCEPTANCE_TOLERANCE:
             system_prompt.set_value(actual_candidate_text)
             # [캐시 갱신] 채택된 후보 프롬프트의 점수를 다음 iteration의 현재 점수로 사용
             cached_val_score_current = val_score_candidate
-            print(f"✅ Prompt accepted & Updated (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
+            ##### 차별점 #####
+            # [Improve] 채택 시: 이전 거절 컨텍스트 리셋 (JudgeLLM에게 더 이상 전달 불필요)
+            previous_rejection_info_str = ""
+            ###################
+            if score_diff >= 0:
+                print(f"✅ Prompt accepted & Updated (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
+            else:
+                print(f"✅ Prompt accepted within tolerance (val: {val_score_current:.3f} -> {val_score_candidate:.3f}, diff: {val_score_candidate - val_score_current:.3f})")
         else:
             system_prompt.set_value(original_prompt_value)
             if is_new_candidate:
-                print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f})")
+                print(f"❌ Prompt rejected (val: {val_score_current:.3f} vs {val_score_candidate:.3f}, diff: {val_score_candidate - val_score_current:.3f})")
+                ##### 차별점 #####
+                # [Improve] 거절 시: CANDIDATE_NON_EXCEPT_INFO를 XML 태그 문자열로 포맷하여 저장
+                #           → 다음 iteration의 JudgeLLM evaluation instruction에 주입됨
+                previous_rejection_info_str = (
+                    "<CANDIDATE_NON_EXCEPT_INFO>\n"
+                    f"  <STEP_BEFORE_SYSTEM_PROMPT>\n{CANDIDATE_NON_EXCEPT_INFO['STEP_BEFORE_SYSTEM_PROMPT']}\n  </STEP_BEFORE_SYSTEM_PROMPT>\n"
+                    f"  <STEP_NOW_SYSTEM_PROMPT>\n{CANDIDATE_NON_EXCEPT_INFO['STEP_NOW_SYSTEM_PROMPT']}\n  </STEP_NOW_SYSTEM_PROMPT>\n"
+                    f"  <STEP_BETWEEN_DIFF>{CANDIDATE_NON_EXCEPT_INFO['STEP_BETWEEN_DIFF']}</STEP_BETWEEN_DIFF>\n"
+                    f"  <MESSAGE>{CANDIDATE_NON_EXCEPT_INFO['MESSAGE']}</MESSAGE>\n"
+                    "</CANDIDATE_NON_EXCEPT_INFO>"
+                )
+                ###################
 
         # 6) Iteration 로그 업데이트
         for idx in range(iteration_log_start_idx, len(optimization_logs)):
@@ -1150,7 +1604,8 @@ def main():
 
         # Validation 정보를 해당 iteration의 모든 로그에 추가
         for idx in range(iteration_log_start_idx, len(optimization_logs)):
-            optimization_logs[idx]['dataset_size'] = batch_size
+            optimization_logs[idx]['dataset_size'] = len(train_pool)
+            optimization_logs[idx]['train_batch_size'] = batch_size
             optimization_logs[idx]['avg_total_score'] = iteration_avg_score
             optimization_logs[idx]['validation_info'] = validation_info
             optimization_logs[idx]['validation_accuracy'] = val_score_candidate
@@ -1163,6 +1618,130 @@ def main():
         _do_db_save()
 
     # ========== [TextGrad 논문 재현 루프 끝] ==========
+
+    # -----------------------------------------------------------------------
+    # [episode=total_iterations+1] 최종 프롬프트를 전체 Test Set으로 평가
+    # - 학습/최적화 단계가 아니므로 validation_* 필드는 사용하지 않습니다.
+    # - 논문과 동일한 Apple-to-Apple 비교를 위한 최종 성능 측정 단계입니다.
+    # - EXPERIMENT_INS.enable_test_evaluation == False 이면 건너뜁니다.
+    # -----------------------------------------------------------------------
+    final_episode = total_iterations + 1
+    if not EXPERIMENT_INS.enable_test_evaluation:
+        print(f"\n[episode={final_episode}] Test 평가 비활성화 (enable_test_evaluation=False), 건너뜁니다.")
+        final_test_dataset = []
+    else:
+        print(f"\n[episode={final_episode}] 최종 프롬프트 Test Set 전체 평가 시성...")
+        final_test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
+
+    if final_test_dataset:
+        base_log_final = create_base_log(
+            experiment_id,
+            final_episode,
+            textgrad_backward_model_nm,
+            textgrad_forward_model_nm,
+            embedding_model_nm,
+            dataset_nm=EXPERIMENT_INS.default_dataset_name,
+        )
+        final_test_score = 0.0
+        final_test_count = 0
+        final_test_info = {}
+
+        final_summary_log = create_success_log(
+            base_log_final,
+            system_prompt.value,
+            question=f"[Test Summary] episode={final_episode}",
+            context="",
+            ground_truth="[N/A]",
+            prediction="[N/A]",
+            computed_loss_value="[N/A] 최종 Test 평가 요약 row (backward 없음)",
+            raw_similarity=None,
+            ragas_faithfulness_score=None,
+            ragas_answer_relevancy_score=None,
+            optimizer_system_prompt=optimizer_system_prompt,
+            accuracy=None,
+        )
+        final_summary_log['test_info'] = {}
+        final_summary_log['test_accuracy'] = None
+        final_summary_log['test_dataset_size'] = len(final_test_dataset)
+        final_summary_log['validation_info'] = None
+        final_summary_log['validation_accuracy'] = None
+        final_summary_log['validation_dataset_size'] = None
+        final_summary_log['dataset_size'] = len(train_pool)
+        final_summary_log['train_batch_size'] = batch_size
+        final_summary_log['avg_total_score'] = None
+        optimization_logs.append(final_summary_log)
+        _do_db_save()  # final summary row 최초 insert
+
+        for final_idx, final_data in enumerate(final_test_dataset, 1):
+            if final_idx % 50 == 0 or final_idx == 1:
+                print(f"  [episode={final_episode}] [{final_idx}/{len(final_test_dataset)}] 최종 프롬프트 Test 평가 중...")
+
+            final_context = normalize_text_field(final_data.get('context', ''))
+            final_question = normalize_text_field(final_data.get('question', ''))
+            final_gt = normalize_text_field(final_data.get('answer', ''))
+            final_persona = final_data.get('system_persona', '')
+            final_inputs = EXPERIMENT_INS.build_forward_input(final_question, final_context, final_persona)
+
+            try:
+                final_var = tg.Variable(final_inputs, role_description="Final test input", requires_grad=False)
+                final_pred = model(final_var).value
+                final_pred_for_eval, _ = extract_response_text_from_tester_output(final_pred)
+
+                if is_numeric_exact_match_dataset:
+                    pred_num = parse_integer_answer(final_pred_for_eval)
+                    gt_num = parse_integer_answer(final_gt)
+                    final_score_sample = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
+                elif is_multiple_choice:
+                    final_score_sample = similarity_judge(final_gt, final_pred_for_eval) if similarity_judge else 0.0
+                else:
+                    final_score_sample = similarity_judge(final_gt, final_pred_for_eval) if similarity_judge else 0.0
+
+                final_test_score += final_score_sample
+                final_test_count += 1
+                final_test_info[str(final_idx - 1)] = {
+                    "Q": final_question,
+                    "A": final_pred,
+                    "GA": final_gt,
+                    "score": final_score_sample,
+                }
+            except Exception as e:
+                root_error = extract_root_error_message(e)
+                final_test_info[str(final_idx - 1)] = {
+                    "Q": final_question,
+                    "A": "[ERROR]",
+                    "GA": final_gt,
+                    "score": None,
+                    "error": root_error,
+                }
+
+            if final_idx % 100 == 0:
+                running_acc = final_test_score / final_test_count if final_test_count > 0 else 0.0
+                _update_test_summary_row(
+                    episode=final_episode,
+                    test_info=final_test_info,
+                    test_accuracy=running_acc,
+                    test_dataset_size=len(final_test_dataset),
+                )
+                print(
+                    f"  [episode={final_episode}] 중간 저장 완료: "
+                    f"{final_idx}/{len(final_test_dataset)} (acc={running_acc:.4f})"
+                )
+
+        final_test_accuracy = final_test_score / final_test_count if final_test_count > 0 else 0.0
+        print(
+            f"[episode={final_episode}] 완료: 최종 Test Set 정확도 = "
+            f"{final_test_accuracy:.4f} ({final_test_count}/{len(final_test_dataset)}개 평가)"
+        )
+        _update_test_summary_row(
+            episode=final_episode,
+            test_info=final_test_info,
+            test_accuracy=final_test_accuracy,
+            test_dataset_size=len(final_test_dataset),
+        )
+    else:  # final_test_dataset 없음 (enable_test_evaluation=True 인데 데이터 없는 경우)
+        if EXPERIMENT_INS.enable_test_evaluation:
+            print(f"[episode={final_episode}] Test 데이터셋 없음, 건너뜁니다.")
+        # enable_test_evaluation=False 인 경우: 이미 위에서 skip 메시지 출력함
 
     # 5. DB 저장 (루프 정상 완료 후 - 마지막 이터레이션 이후 잔여 로그 방어적 저장)
     print_step("5. DB 로그 저장")

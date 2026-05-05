@@ -50,6 +50,7 @@ class HierarchicalEvaluator:
 
         """
         required_tag_pairs = [
+            ("<meta_for_optimizer>", "</meta_for_optimizer>"),
             ("<accuracy_analysis>", "</accuracy_analysis>"),
             ("<accuracy>", "</accuracy>"),
             ("<style_format_analysis>", "</style_format_analysis>"),
@@ -64,12 +65,13 @@ class HierarchicalEvaluator:
         missing_pairs = []
         nested_errors = []
 
-        # 첫 루트 태그(<accuracy_analysis>) 이전에 텍스트가 있으면 경고
-        first_root_idx = text.lower().find("<accuracy_analysis>")
+        # 첫 루트 태그(<meta_for_optimizer>) 이전 prefix 검사
+        # - meta_for_optimizer 앞에는 불필요한 텍스트가 없어야 함
+        first_root_idx = text.lower().find("<meta_for_optimizer>")
         has_prefix_before_iteration = False
         if first_root_idx > 0 and text[:first_root_idx].strip():
             has_prefix_before_iteration = True
-            nested_errors.append("<accuracy_analysis> 태그 이전에 불필요한 텍스트가 존재합니다.")
+            nested_errors.append("<meta_for_optimizer> 태그 이전에 불필요한 텍스트가 존재합니다.")
 
         for open_tag, close_tag in required_tag_pairs:
             has_open = open_tag in text
@@ -126,8 +128,8 @@ class HierarchicalEvaluator:
         """
         improve 모드 피드백의 태그 구조를 파이썬 코드로 보정한다.
 
-          보정 규칙:
-          1) <accuracy_analysis> 앞에 텍스트가 있으면 제거
+             보정 규칙:
+                 1) <meta_for_optimizer> 앞에 텍스트가 있으면 제거
         2) 필수 태그가 없으면 "un generated" 기본값으로 생성
           3) <accuracy> + <review> 를 <accuracy_analysis> 내부에 강제 배치
           4) <similarity_score> + <review> 를 <style_format_analysis> 내부에 강제 배치
@@ -138,9 +140,9 @@ class HierarchicalEvaluator:
         """
         source_text = "" if feedback_text is None else str(feedback_text)
 
-        # <accuracy_analysis> 이전 텍스트 제거
+        # <meta_for_optimizer> 이전 텍스트 제거
         lower_source = source_text.lower()
-        root_start_idx = lower_source.find("<accuracy_analysis>")
+        root_start_idx = lower_source.find("<meta_for_optimizer>")
         if root_start_idx >= 0:
             working_text = source_text[root_start_idx:]
         else:
@@ -161,6 +163,7 @@ class HierarchicalEvaluator:
         style_source = style_format_content if style_format_content is not None else working_text
         total_source = total_analysis_content if total_analysis_content is not None else working_text
 
+        meta_for_optimizer_value = _value_or_default("meta_for_optimizer", working_text)
         accuracy_value = _value_or_default("accuracy", accuracy_source)
         similarity_score_value = _value_or_default("similarity_score", style_source)
 
@@ -169,7 +172,11 @@ class HierarchicalEvaluator:
         style_review_value = _value_or_default("review", style_source)
         total_review_value = _value_or_default("review", total_source)
 
-        return (
+        reconstructed_body = (
+            "<meta_for_optimizer>\n"
+            f"{meta_for_optimizer_value}\n"
+            "</meta_for_optimizer>\n"
+            "\n"
             "<accuracy_analysis>\n"
             f"    <accuracy> {accuracy_value} </accuracy>\n"
             f"    <review> {accuracy_review_value} </review>\n"
@@ -184,6 +191,7 @@ class HierarchicalEvaluator:
             f"    <review> {total_review_value} </review>\n"
             "</total_analysis>"
         )
+        return reconstructed_body
 
     # 아직 설계 중
     # def __call__(self, prediction_var: tg.Variable, ground_truth: str) -> tg.Variable:

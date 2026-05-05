@@ -632,9 +632,14 @@ def main():
     # [episode=0] 초기 프롬프트를 전체 Test Set으로 평가 (논문 Apple-to-Apple 비교용)
     # 논문 기준: 동일한 Test Set(GSM8k 1,319개)으로 최적화 전/후 성능을 비교합니다.
     # 최적화 루프(ep1~12)의 Validation Set(300개)과는 별개 평가입니다.
+    # EXPERIMENT_INS.enable_test_evaluation == False 이면 이 블록 전체를 건너뜁니다.
     # -----------------------------------------------------------------------
-    print(f"\n[episode=0] 초기 프롬프트 Test Set 전체 평가 시작...")
-    test_dataset = EXPERIMENT_INS.load_test_data()
+    if not EXPERIMENT_INS.enable_test_evaluation:
+        print(f"\n[episode=0] Test 평가 비활성화 (enable_test_evaluation=False), 건너뜁니다.")
+        test_dataset = []
+    else:
+        print(f"\n[episode=0] 초기 프롬프트 Test Set 전체 평가 시작...")
+        test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
 
     if test_dataset:
         base_log_ep0 = create_base_log(
@@ -731,8 +736,10 @@ def main():
             test_accuracy=ep0_accuracy,
             test_dataset_size=len(test_dataset),
         )
-    else:
-        print(f"[episode=0] Test 데이터셋 없음, 건너뜁니다.")
+    else:  # test_dataset 없음 (enable_test_evaluation=True 인데 데이터 없는 경우)
+        if EXPERIMENT_INS.enable_test_evaluation:
+            print(f"[episode=0] Test 데이터셋 없음, 건너뜁니다.")
+        # enable_test_evaluation=False 인 경우: 이미 위에서 skip 메시지 출력함
 
     # ========== [TextGrad 논문 재현 루프 시작] ==========
     random.seed(42)  # train batch 재현성 보장 (실험 간 동일한 batch 순서)
@@ -1269,10 +1276,15 @@ def main():
     # [episode=total_iterations+1] 최종 프롬프트를 전체 Test Set으로 평가
     # - 학습/최적화 단계가 아니므로 validation_* 필드는 사용하지 않습니다.
     # - 논문과 동일한 Apple-to-Apple 비교를 위한 최종 성능 측정 단계입니다.
+    # - EXPERIMENT_INS.enable_test_evaluation == False 이면 건너뜁니다.
     # -----------------------------------------------------------------------
     final_episode = total_iterations + 1
-    print(f"\n[episode={final_episode}] 최종 프롬프트 Test Set 전체 평가 시작...")
-    final_test_dataset = EXPERIMENT_INS.load_test_data()
+    if not EXPERIMENT_INS.enable_test_evaluation:
+        print(f"\n[episode={final_episode}] Test 평가 비활성화 (enable_test_evaluation=False), 건너뜁니다.")
+        final_test_dataset = []
+    else:
+        print(f"\n[episode={final_episode}] 최종 프롬프트 Test Set 전체 평가 시작...")
+        final_test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
 
     if final_test_dataset:
         base_log_final = create_base_log(
@@ -1378,8 +1390,10 @@ def main():
             test_accuracy=final_test_accuracy,
             test_dataset_size=len(final_test_dataset),
         )
-    else:
-        print(f"[episode={final_episode}] Test 데이터셋 없음, 건너뜁니다.")
+    else:  # final_test_dataset 없음 (enable_test_evaluation=True 인데 데이터 없는 경우)
+        if EXPERIMENT_INS.enable_test_evaluation:
+            print(f"[episode={final_episode}] Test 데이터셋 없음, 건너뜁니다.")
+        # enable_test_evaluation=False 인 경우: 이미 위에서 skip 메시지 출력함
 
     # 5. DB 저장 (루프 정상 완료 후 - 마지막 이터레이션 이후 잔여 로그 방어적 저장)
     print_step("5. DB 로그 저장")
