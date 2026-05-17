@@ -75,3 +75,46 @@ def load_gsm8k_dataset(sample_size=None, random_seed=42):
     print(f"[GSM8k Loader] {random_seed} 시드로 셔플 완료")
 
     return dataset
+
+
+def load_gsm8k_test_dataset(sample_size=None, random_seed=42):
+    """
+    GSM8k test.csv 를 로드합니다.
+    초기 프롬프트 및 최적화 완료 후 최종 성능 측정(Apple-to-Apple 비교)용.
+
+    @참고:
+        - train.csv: 학습용 (load_gsm8k_dataset)
+        - test.csv : 평가용 (이 함수) — 논문에서는 1,319개 전체 사용
+    """
+    file_path = BASE_DIR / "datafile" / "original" / "openai" / "gsm8k" / "main" / "test.csv"
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"GSM8k test 데이터셋을 찾을 수 없습니다: {file_path}\n"
+            f"먼저 utils/datasets/baseline/gsm8k_download_datasets.py 를 실행하세요."
+        )
+
+    try:
+        df = pd.read_csv(file_path)
+        print(f"[GSM8k Test Loader] 로드 완료. 총 {len(df)}개 행.")
+    except Exception as e:
+        raise RuntimeError(f"GSM8k test 데이터셋 읽기 실패: {e}") from e
+
+    if sample_size:
+        df = df.sample(n=min(sample_size, len(df)), random_state=random_seed)
+        df = df.reset_index(drop=True)
+        print(f"[GSM8k Test Loader] {random_seed} 시드로 {len(df)}개 샘플 추출")
+
+    dataset = []
+    for _, row in df.iterrows():
+        if pd.isna(row.get("question")) or pd.isna(row.get("answer")):
+            continue
+        example = dspy.Example(
+            question=row["question"],
+            context="",
+            answer=row["answer"],
+        ).with_inputs("question", "context")
+        dataset.append(example)
+
+    print(f"[GSM8k Test Loader] 변환 완료: {len(dataset)}개 예제")
+    return dataset
