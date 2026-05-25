@@ -1,60 +1,7 @@
 """
-@경로: main_textgrad_baseline.py
-@설명: TextGrad를 활용한 프롬프트 최적화 및 DB 저장
-- TextGrad 의 기본 논문 을 재현한다.
-- 추후 내가 설계한 다양한 Judge 모델과, 보상함수와도 연동할 수 있도록 구조화한다.
-- TextGrad의 'Step'을 'Episode' 컬럼으로 매핑하여, 각 최적화 단계별로 상세 로그를 DB에 저장한다.
-- 일단 내 연구의 최종 프레임워크가 어떻게 될 지는 모르겠으나,
-  TextGrad baseline 과, TextGrad + Judges+Reward 의 차이를 비교하고,
-  또 다른 OPRO 논문과의 비교도 추가하여,
-  각 연구논문 들 baseline 과, 그 상태에서 계층적 피드백을 주었을때의 차이를 비교하면 좋을 것 같다.
-
-- 2026.03.07 데이터 로그 적재 부 추가
-- 2026.03.30 논문 방식 Validation 캐싱 및 Forward 분기 구현
-    [변경 1] Validation 루프 - 현재 프롬프트 캐싱 방식 적용 (논문 근거)
-        이전: 매 iteration마다 현재 프롬프트 + 후보 프롬프트 둘 다 평가 (val_count × 2번 LLM 호출)
-        이후: Episode 시작 시 현재 프롬프트를 1회 평가해 캐시(cached_val_score_current),
-              매 iteration은 후보 프롬프트만 평가 (val_count × 1번),
-              프롬프트 채택 시 캐시 점수도 갱신하여 다음 iteration의 기준값으로 사용
-        근거: "기존 프롬프트의 점수는 이미 알고 있거나 캐싱되어 있으므로
-               새로운 후보 프롬프트에 대해서만 Validation 데이터셋 크기만큼 LLM을 호출" (논문)
-    [변경 2] Train Forward 분기 명확화
-        이전: for 루프로 test_time_updates번 무조건 반복 후 결과 합산
-        이후: if/else 분기로 완전히 분리
-              - GPQA/MMLU/HQH (is_multiple_choice and test_time_updates > 1):
-                  3회 생성 + Majority Voting → Accuracy (현재 실험에서는 실행되지 않는 분기, 구조만 유지)
-              - GSM8k / 그 외 (else):
-                  model(query_var) 단 1회 호출 (논문 기준 프롬프트 최적화 루프)
-                  GSM8k면 compute_gsm8k_accuracy, 그 외면 accuracy=None
-
-NULL(값 없음):
-    샘플 스킵(인젝션 패턴) 시 점수 필드
-    Judge 초기화 자체 실패로 해당 점수를 계산할 수 없는 경우
-NaN(계산 망가짐):
-    샘플 처리 예외로 평가가 깨진 경우
-    RAGAS 평가가 실행됐지만 내부 Evaluation error/예외가 난 경우
-    (유사도 호출에서 예외 발생 시도 NaN)
-
-[중요] context vs <CONTEXT> 태그의 차이
-====================================
-이 코드에서 "context"라는 용어가 두 가지 다른 의미로 사용됩니다:
-
-1. **데이터의 context** (RAG 문서 자료)
-   - 변수명: context, val_context
-   - 의미: RAG 챗봇에서 LLM에게 제공하는 문서 자료, 배경 정보
-   - 예시: NASA 센서 로그, KLUE 검색 결과, 뉴스 기사 등
-   - GSM8k 같은 수학 문제는 context가 없음 (빈 문자열)
-   - 사용처: Forward Model 입력 (답변 생성 LLM)
-   
-2. **TextGrad optimizer의 <CONTEXT> 태그** (이전 최적화 피드백)
-   - 의미: Optimizer LLM에게 주는 "이전 최적화 시도의 피드백 이력"
-   - 내용: "이전에 이런 프롬프트로 이런 문제를 풀었더니 이런 오답과 피드백이 나왔다"
-   - TextGrad 라이브러리가 자동으로 관리 (backward()로 생성된 gradient를 채움)
-   - 사용처: Optimizer LLM이 프롬프트를 개선할 때 참고
-   - 이 코드에서는 직접 조작하지 않음 (라이브러리 내부 처리)
-
-두 개념은 완전히 다르며, 혼동하지 않도록 주의가 필요합니다.
-====================================
+@경로: main_textgrad_improve.py
+@설명: TextGrad를 활용한 프롬프트 최적화 - 본 연구 논문
+@연관문서: docs/main_textgrad_improve.md
 """
 DEBUG_INDIVIDUAL_BACKWARD = False # 디버그 모드
 
@@ -62,12 +9,10 @@ DEBUG_INDIVIDUAL_BACKWARD = False # 디버그 모드
 # [성능 프로파일링] 파일 실행 시작 시점 기록
 # ============================================================================
 import time
+from functools import partial
+from utils.log.printing import _print_elapsed
 _SCRIPT_START_TIME = time.time()
-
-def _print_elapsed(label):
-    """파일 시작부터 현재까지 경과 시간 출력"""
-    elapsed = time.time() - _SCRIPT_START_TIME
-    print(f"[⏱️  {elapsed:.2f}s] {label}")
+_print_elapsed = partial(_print_elapsed, program_start_time=_SCRIPT_START_TIME)
 
 
 import textgrad as tg
@@ -125,6 +70,7 @@ _print_elapsed("나머지 utils 함수들 import 시작")
 from utils.llm_errors.error_parsers import extract_root_error_message
 from utils.llm_errors.error_debugger import debug_individual_backward_samples
 from utils.llm_safety.azure_prompt_filters import has_jailbreak_like_pattern
+from utils.prompt.candidate_prompt_extractor import CandidatePromptExtractor
 from utils.text.normalization import normalize_text_field
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from utils.llm_patches.textgrad_info import get_tgd_optimizer_system_prompt, stringify_tgd_update_prompt
@@ -138,7 +84,6 @@ from reward.hierarchical_evaluator import HierarchicalEvaluator
 # 기타 LLM get 함수들
 from metrics.judges.similarity_judge import create_similarity_judge 
 from metrics.judges.ragas_failthfulness_judge import create_ragas_judge
-from metrics.prompts.textgrad_baseline_prompts import build_azure_safe_optimizer_system_prompt
 
 # Multiple-choice 평가 유틸리티 (GPQA/MMLU/HQH용)
 from metrics.judges.multiple_choice_judge import (
@@ -155,206 +100,14 @@ from metrics.judges.gsm8k_judge import string_based_equality_fn
 _print_elapsed("모든 라이브러리 Import 완료")
 
 
-# ============================================================================
-# [CoT 추출] 모델별 Chain of Thought 처리 함수
-# ============================================================================
-
-
-def extract_reasoning_from_gpt5_response(
-    raw_response_text: str,
-    forward_engine=None,
-    query_text: str | None = None,
-    system_prompt_text: str | None = None
-) -> str:
-    """
-    GPT-5 모델의 응답에서 Chain of Thought (reasoning)을 추출한다.
-    
-    GPT-5는 OpenAI의 최신 모델로, 다음과 같은 기능을 지원할 수 있습니다:
-    - response_metadata에 reasoning 정보 포함
-    - 별도의 API 옵션으로 extended thinking 활용 가능
-    
-    @Param:
-        raw_response_text: 현재까지 수집한 응답 텍스트
-        forward_engine: 필요시 추가 API 호출용 LLM 객체
-        query_text: 필요시 재질의용 쿼리 텍스트
-        system_prompt_text: 필요시 재질의용 시스템 프롬프트
-    
-    @Return:
-        최종 응답 텍스트 (reasoning 정보 포함)
-    
-    @주요 기능 (향후 확장):
-        1. OpenAI API response_metadata에서 reasoning 필드 추출
-        2. extended thinking 모드 활용 시 thinking 콘텐츠 추출
-        3. 명시적 프롬프트로 chain-of-thought 생성 유도
-    """
-    
-    print(f"[CoT 추출 - GPT-5] Chain of Thought 추출 시작")
-    print(f"  - 응답 길이: {len(raw_response_text)} 글자")
-    
-    # [현재 구현]
-    # - API 레이어에서 raw_response_text로 전체 응답 받음
-    # - 내부적으로 reasoning 포함될 가능성 있음
-    # 
-    # [향후 구현 계획]
-    # 1. forward_engine.generate() 호출 시 extended_thinking=True 옵션 추가
-    # 2. response.response_metadata['reasoning'] 필드 추출
-    # 3. 또는 forward_engine에서 직접 reasoning 텍스트 접근
-    
-    # TODO: backward_engine (평가자 LLM)을 활용하여 reasoning 재구성 가능
-    # 예: "다음 응답의 사고 과정을 재구성하세요: {raw_response_text}"
-    
-    final_response = raw_response_text
-    print(f"[CoT 추출 - GPT-5] 최종 응답 길이: {len(final_response)} 글자")
-    
-    return final_response
-
-
-def extract_reasoning_from_gpt4_response(
-    raw_response_text: str,
-    forward_engine=None,
-    query_text: str | None = None,
-    system_prompt_text: str | None = None
-) -> str:
-    """
-    GPT-4 모델의 응답에서 Chain of Thought를 추출한다.
-    
-    GPT-4는 GPT-5에 비해 reasoning 기능이 제한적이므로,
-    다음 전략을 사용합니다:
-    - 명시적 프롬프트 지시 (앞서 baseline_prompt.py에서 추가함)
-    - 또는 backward_engine을 활용한 사후 reasoning 재구성
-    
-    @Param:
-        raw_response_text: 현재까지 수집한 응답 텍스트
-        forward_engine: 필요시 추가 API 호출용 LLM 객체
-        query_text: 필요시 재질의용 쿼리 텍스트
-        system_prompt_text: 필요시 재질의용 시스템 프롬프트
-    
-    @Return:
-        최종 응답 텍스트 (reasoning 정보 포함)
-    
-    @주요 특징:
-        1. baseline_prompt의 "Think step by step" 명령 사용
-        2. 초기 프롬프트에서 이미 reasoning 생성 유도
-        3. 추가 API 호출 최소화 (비용 효율)
-    """
-    
-    print(f"[CoT 추출 - GPT-4] Chain of Thought 추출 시작")
-    print(f"  - 응답 길이: {len(raw_response_text)} 글자")
-    
-    # [현재 구현]
-    # - baseline_prompt에서 "Think step by step" 이미 요청함
-    # - LLM이 자동으로 단계별 사고 과정 포함
-    # - raw_response_text에 이미 reasoning 포함될 가능성 높음
-    #
-    # [향후 개선]
-    # 1. 초기 프롬프트에 더 강력한 CoT 요청 추가
-    #    (예: "각 단계를 명확히 구분하여 작성하세요")
-    # 2. response 내에서 step marker (Step 1:, Step 2:, 등) 추출
-    # 3. 필요시 backward_engine으로 reasoning 재구성
-    
-    final_response = raw_response_text
-    print(f"[CoT 추출 - GPT-4] 최종 응답 길이: {len(final_response)} 글자")
-    
-    return final_response
-
-
-def extract_tester_response_with_cot(
-    forward_model_name: str,
-    raw_response_text: str,
-    forward_engine=None,
-    query_text: str | None = None,
-    system_prompt_text: str | None = None
-) -> str:
-    """
-    TesterLLM의 응답에서 Chain of Thought 텍스트를 추출한다.
-    모델별로 다른 처리 전략을 적용한다.
-    
-    @Param:
-        forward_model_name: forward_engine의 모델명 (e.g., "gpt-4o-mini", "gpt-3.5-turbo", "gpt-5" 등)
-        raw_response_text: 현재까지 수집한 응답 텍스트
-        forward_engine: 필요시 추가 API 호출용 LLM 객체
-        query_text: 필요시 재질의용 쿼리 텍스트
-        system_prompt_text: 필요시 재질의용 시스템 프롬프트
-    
-    @Return:
-        최종 응답 텍스트 (CoT 정보 포함 여부는 모델에 따라 다름)
-    
-    @모델별 분기 기준:
-        1. GPT-5: reasoning 필드 활용 (최신 기능) ← extract_reasoning_from_gpt5_response()
-        2. GPT-4: 명시적 프롬프트 + 단계별 사고 유도 ← extract_reasoning_from_gpt4_response()
-        3. GPT-3.5: 기본 응답 (향후 <thinking> 태그 지원)
-        4. Claude: 자체 reasoning 메커니즘 (향후 지원)
-    """
-    
-    model_lower = forward_model_name.lower()
-    print(f"[CoT 추출 DISPATCH] Forward Model: {forward_model_name}")
-    
-    # ===== GPT-5 감지 (최신 모델) =====
-    if 'gpt-5' in model_lower:
-        print(f"[CoT 추출] GPT-5 감지 ({forward_model_name}): GPT-5 전용 reasoning 추출")
-        return extract_reasoning_from_gpt5_response(
-            raw_response_text=raw_response_text,
-            forward_engine=forward_engine,
-            query_text=query_text,
-            system_prompt_text=system_prompt_text
-        )
-    
-    # ===== GPT-4 감지 (gpt-4, gpt-4o, gpt-4-turbo 등) =====
-    elif 'gpt-4' in model_lower:
-        print(f"[CoT 추출] GPT-4 감지 ({forward_model_name}): GPT-4 전용 reasoning 추출")
-        return extract_reasoning_from_gpt4_response(
-            raw_response_text=raw_response_text,
-            forward_engine=forward_engine,
-            query_text=query_text,
-            system_prompt_text=system_prompt_text
-        )
-    
-    # ===== GPT-3.5 감지 =====
-    elif 'gpt-3.5' in model_lower or 'gpt-35' in model_lower:
-        # ##### 차별점 #####
-        # [gpt-3.5-turbo] 현재: 아무 처리 없음
-        # [TODO] 향후: <thinking> 태그 프롬프트 추가
-        #   - 초기 프롬프트에 "반드시 <thinking>...</thinking> 태그로 생각 과정을 감싸서 작성하세요" 추가
-        #   - 그러면 LLM이 자동으로 thinking 블록을 생성하도록 유도 가능
-        ###################
-        print(f"[CoT 추출] GPT-3.5 감지 ({forward_model_name}): 기본 응답 사용 (향후 <thinking> 태그 처리 예정)")
-        return raw_response_text
-    
-    # ===== Claude 감지 (향후 확장) =====
-    elif 'claude' in model_lower:
-        print(f"[CoT 추출] Claude 감지 ({forward_model_name}): Claude 전용 처리 준비 중...")
-        # TODO: Claude의 thinking_blocks 또는 자체 reasoning 메커니즘 활용
-        return raw_response_text
-    
-    else:
-        # 기타 모델: 기본 응답 사용
-        print(f"[CoT 추출] ⚠️ 알 수 없는 모델 ({forward_model_name}): 기본 응답 사용")
-        return raw_response_text
-
-
-def build_train_output_format_instruction() -> str:
-    """Train 단계에서만 적용할 TesterLLM 출력 포맷 강제 지시문을 생성한다."""
-    return (
-        "\n\n[중요 출력 형식]\n"
-        "반드시 아래 XML 태그 형식을 정확히 지켜서 답변하세요.\n"
-        "1) 풀이/사고 과정은 <CoT>...</CoT> 태그 안에 작성\n"
-        "2) 최종 답변만 <Response>...</Response> 태그 안에 작성\n"
-        "3) <Response>에는 최종 답만 간결하게 작성\n"
-        "4) 반드시 <CoT>와 <Response> 둘 다 포함\n"
-    )
-
-
-def force_train_input_with_cot_response_tags(forward_input: str) -> str:
-    """기존 Forward 입력에 CoT/Response 출력 형식 요구사항을 덧붙인다."""
-    return f"{forward_input}{build_train_output_format_instruction()}"
-
-
 def extract_response_text_from_tester_output(raw_output_text: str) -> tuple[str, bool]:
-    """TesterLLM 원문에서 <Response> 태그 값을 추출하고, 없으면 원문을 그대로 반환한다."""
-    match = re.search(r"<Response>(.*?)</Response>", raw_output_text, re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1).strip(), True
-    return raw_output_text.strip(), False
+    # """TesterLLM 원문에서 <Response> 태그 값을 추출하고, 없으면 원문을 그대로 반환한다."""
+    # match = re.search(r"<Response>(.*?)</Response>", raw_output_text, re.DOTALL | re.IGNORECASE)
+    # if match:
+    #     return match.group(1).strip(), True
+    if raw_output_text is None:
+        return "", False
+    return raw_output_text.strip(), True
 
 
 def main():
@@ -398,34 +151,7 @@ def main():
     # ============================================================================
     # TextGrad 엔진 초기화: 2가지 역할로 나뉜 LLM
     # ============================================================================
-    # get_textgrad_*_engine()은 (engine, model_name) 튜플을 반환:
-    #   - engine: 실제 LLM API를 호출하는 실행 객체 (예: ChatOpenAI 인스턴스)
-    #   - model_name: 사용된 모델명 문자열 (예: "gpt-4o-mini") - DB 로그 기록용
-    
-    # 1️⃣ forward_engine (답변 생성자 LLM)
-    #    ┌─────────────────────────────────────────────────┐
-    #    │ 역할: 문제를 풀고 답변 생성 (단 1가지!)        │
-    #    │ 예시: "5 + 3 = 8개입니다"                      │
-    #    │ 사용처: model(query) 호출 시만                 │
-    #    └─────────────────────────────────────────────────┘
     forward_engine, textgrad_forward_model_nm = get_textgrad_forward_engine()
-    
-    # 2️⃣ backward_engine (선생님 LLM - 평가/피드백/최적화 모두 담당!)
-    #    ┌─────────────────────────────────────────────────────────────────┐
-    #    │ 역할 A: 평가 (Evaluation Forward)                             │
-    #    │   - TextLoss 사용 시: loss(prediction) 호출하면 이 엔진 사용  │
-    #    │   - 예시: "이 답변은 정확합니다. 10/10점"                      │
-    #    │   ★ 주의: forward_engine 아님!                                │
-    #    ├─────────────────────────────────────────────────────────────────┤
-    #    │ 역할 B: 피드백 생성 (Evaluation Backward)                     │
-    #    │   - loss.backward() 호출하면 이 엔진 사용                     │
-    #    │   - 예시: "프롬프트에 '단계별로 풀이하라' 추가 필요"          │
-    #    ├─────────────────────────────────────────────────────────────────┤
-    #    │ 역할 C: 프롬프트 개선 (Optimizer)                             │
-    #    │   - optimizer.step() 호출하면 이 엔진 사용                    │
-    #    │   - 예시: "문제를 풀어라" → "문제를 단계별로 풀어라"          │
-    #    └─────────────────────────────────────────────────────────────────┘
-    #    ★ 핵심: backward_engine 하나가 A, B, C 역할 모두 담당!
     backward_engine, textgrad_backward_model_nm = get_textgrad_backward_engine()
     
     # TextGrad 라이브러리에 backward_engine 전역 설정
@@ -438,7 +164,7 @@ def main():
     embedding_model_nm = similarity_judge.embedding_model_nm if similarity_judge else None
     print(f"[DEBUG] Similarity Judge 초기화: {similarity_judge is not None}")
     print(f"[DEBUG] Embedding Model Name: {embedding_model_nm}")
-    ragas_judge = create_ragas_judge()
+    ragas_judge = create_ragas_judge() if EXPERIMENT_INS.ragas_judge else None
     # ----------------------------------------- 차별점 -----------------------------------------
     # improve 모드 전용: backward Judge 피드백 출력 태그 검사기
     feedback_structure_validator = HierarchicalEvaluator(judge_llm=None)
@@ -447,17 +173,8 @@ def main():
     
     
     # 데이터셋 타입 감지 (accuracy 계산용)
-    dataset_name_lower = EXPERIMENT_INS.default_dataset_name.lower()
-    is_multiple_choice = any(keyword in dataset_name_lower for keyword in ['gpqa', 'mmlu', 'hqh'])
-    is_gsm8k = 'gsm8k' in dataset_name_lower
-    is_object_counting = 'object_counting' in dataset_name_lower
-    is_numeric_exact_match_dataset = is_gsm8k or is_object_counting
-    
-    print(
-        f"[✓] 데이터셋 타입: multiple_choice={is_multiple_choice}, "
-        f"gsm8k={is_gsm8k}, object_counting={is_object_counting}, "
-        f"numeric_exact_match={is_numeric_exact_match_dataset}"
-    )
+    is_multiple_choice = any(keyword in EXPERIMENT_INS.default_dataset_name.lower() for keyword in ['gpqa', 'mmlu', 'hqh'])
+    is_numeric_exact_match_dataset = EXPERIMENT_INS.is_numeric_exact_match_dataset
     
     # [연구 로드맵] 현재는 TextGrad Baseline 재현 단계
     # 향후 발전 방향: tg.TextLoss(평가 지시문 문자열) 대신
@@ -506,30 +223,6 @@ def main():
     # ============================================================================
     # 4. Optimizer 생성 - backward_engine(평가자 LLM)을 사용하여 프롬프트 개선
     # ============================================================================
-    # TextualGradientDescentwithMomentum:
-    # - parameters: 개선할 대상 (system_prompt)
-    # - engine: backward_engine(평가자 LLM) 사용
-    # - optimizer.step() 호출 시:
-    #   1. system_prompt.gradients에서 피드백(gradient) 가져오기
-    #   2. backward_engine에게 "이 피드백을 바탕으로 새 프롬프트 만들어줘" 요청
-    #   3. backward_engine이 개선된 프롬프트 생성
-    #   4. system_prompt 업데이트
-    # 
-    # 예: 피드백 "단계별 설명 필요" → backward_engine: "문제를 단계별로 풀어라"
-    
-    # 일반 옵티마이저 (비교/회귀 확인용)
-    # optimizer = tg.TGD(
-    #     parameters=list(model.parameters()),
-    #     engine=backward_engine,
-    #     gradient_memory=momentum_window,
-    # )
-
-    # 모멘텀 적용 옵티마이저 (논문 재현 경로)
-    # [Azure Content Filter 회피 전략]
-    # optimizer_system_prompt를 커스터마이징하여 건전한 최적화 가이드라인 제공
-
-    # TODO 아래 custom 프롬프트는 improve 실험 모드에서 사용할 것
-    # custom_optimizer_system_prompt = build_azure_safe_optimizer_system_prompt()
     
     optimizer = TextualGradientDescentwithMomentum(
         parameters=list(model.parameters()),
@@ -540,6 +233,7 @@ def main():
     # optimizer(TGD): TextGrad의 텍스트 경사하강 업데이트기.
     # backward에서 나온 피드백을 입력으로 받아, 최적화 대상 변수(system_prompt.value)를 한 step씩 실제로 갱신한다.
     optimizer_system_prompt = get_tgd_optimizer_system_prompt(optimizer)
+    candidate_prompt_extractor = CandidatePromptExtractor()
     # 위 시스템 프롬프트 기본 버전에는 (라이브러리)
     #  <IMPROVED_VARIABLE> 이 태그 안에 응답을 생성해서 넣으라고 되어있음.
 
@@ -722,7 +416,6 @@ def main():
     atexit.register(_emergency_save)
 
     print(f"--- TextGrad Baseline Optimization (논문 재현) 시작 ---")
-    print(f"Total Iterations: {total_iterations}, Batch size: {batch_size}")
 
     # -----------------------------------------------------------------------
     # [논문 구현] 현재 프롬프트의 Validation 점수 초기 캐싱 (루프 진입 전 1회)
@@ -824,7 +517,7 @@ def main():
         print(f"\n[episode=0] 초기 프롬프트 Test Set 전체 평가 시작...")
         test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
 
-    def _evaluate_single_test_sample(sample_idx: int, sample_data: dict, role_description: str):
+    def _evaluate_single_test_sample(sample_idx: int, sample_data: dict, role_description: str, prompt_iteration: int):
         sample_context = normalize_text_field(sample_data.get('context', ''))
         sample_question = normalize_text_field(sample_data.get('question', ''))
         sample_gt = normalize_text_field(sample_data.get('answer', ''))
@@ -850,6 +543,7 @@ def main():
                 "A": sample_pred,
                 "GA": sample_gt,
                 "score": sample_score,
+                "prompt_iteration": prompt_iteration,
             }
             return sample_idx, sample_score, True, sample_info
         except Exception as error:
@@ -860,6 +554,7 @@ def main():
                 "GA": sample_gt,
                 "score": None,
                 "error": root_error,
+                "prompt_iteration": prompt_iteration,
             }
             return sample_idx, None, False, sample_info
 
@@ -904,7 +599,7 @@ def main():
         ep0_workers = min(test_eval_max_workers, len(test_dataset))
         with ThreadPoolExecutor(max_workers=ep0_workers) as executor:
             ep0_futures = [
-                executor.submit(_evaluate_single_test_sample, ep0_idx, ep0_data, "Test input")
+                executor.submit(_evaluate_single_test_sample, ep0_idx, ep0_data, "Test input", 0)
                 for ep0_idx, ep0_data in enumerate(test_dataset)
             ]
 
@@ -948,7 +643,7 @@ def main():
     previous_rejection_info_str = ""  # iteration 간 유지되는 거절 컨텍스트
     ###################
 
-    random.seed(42)  # train batch 재현성 보장 (실험 간 동일한 batch 순서)
+    random.seed(EXPERIMENT_INS.random_seed)  # [중앙 집중식] train batch 재현성 보장 (실험 간 동일한 batch 순서)
     for iteration in range(1, total_iterations + 1):
         print(f"\n{'='*80}")
         print(f"Iteration {iteration}/{total_iterations} 시작")
@@ -996,10 +691,7 @@ def main():
             try:
                 # [Forward Model 입력 구성]
                 raw_inputs_local = EXPERIMENT_INS.build_forward_input(q, ctx, persona)
-                ##### 차별점 #####
-                # [Improve] Train 단계에서 CoT/Response 태그 형식을 강제
-                inputs_local = force_train_input_with_cot_response_tags(raw_inputs_local)
-                ###################
+                inputs_local = raw_inputs_local
                 query_var_local = tg.Variable(inputs_local, role_description="RAG 입력", requires_grad=False)
 
                 if is_multiple_choice and test_time_updates > 1:
@@ -1027,16 +719,8 @@ def main():
                     # [GSM8k / 그 외 경로] - 단일 forward
                     prediction_var_local = model(query_var_local)  # forward_engine 호출
                     prediction_local = prediction_var_local.value
-                    ##### 차별점 #####
-                    tester_full_raw = extract_tester_response_with_cot(
-                        forward_model_name=textgrad_forward_model_nm,
-                        raw_response_text=prediction_local,
-                        forward_engine=forward_engine,
-                        query_text=query_var_local.value,
-                        system_prompt_text=system_prompt.value,
-                    )
+                    tester_full_raw = prediction_local
                     prediction_for_eval_local, _ = extract_response_text_from_tester_output(tester_full_raw)
-                    ###################
                     acc = None
 
                 # 유사도 점수 (참고 지표)
@@ -1360,44 +1044,18 @@ def main():
         print(optimizer_response_text)
         print(f"\n{'='*80}\n")
 
-        patterns = [
-            r"<new_variable>(.*?)</new_variable>",
-            r"<IMPROVED_VARIABLE>(.*?)</IMPROVED_VARIABLE>",
-            r"<refined_template>(.*?)</refined_template>",
-            r"<OPTIMIZER_WRITING_TEXT_START>(.*?)<OPTIMIZER_WRITING_TEXT_END>",
-            r"```(.*?)```",
-        ]
+        extraction_result = candidate_prompt_extractor.extract(
+            optimizer_response_text=optimizer_response_text,
+            fallback_prompt=system_prompt.value,
+        )
+        actual_candidate_text = extraction_result.candidate_text
+        matched_pattern = extraction_result.matched_pattern
+        pattern_results = extraction_result.pattern_match_logs
 
-        actual_candidate_text = None
-        matched_pattern = None
-        pattern_results = []
+        if extraction_result.success:
+            print(f"✅ 후보 프롬프트 추출 성공! (패턴: {matched_pattern})")
 
-        for pattern in patterns:
-            match = re.search(pattern, optimizer_response_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                candidate = match.group(1).strip()
-                rejected_reason = []
-                if not candidate:
-                    rejected_reason.append("빈 문자열")
-                if "{" in candidate:
-                    rejected_reason.append("중괄호 포함")
-                if "the improved variable" in candidate.lower():
-                    rejected_reason.append("placeholder 텍스트")
-
-                if not rejected_reason:
-                    actual_candidate_text = candidate
-                    matched_pattern = pattern
-                    pattern_results.append(f"✅ {pattern}: 매칭 성공 & 사용됨")
-                    print(f"✅ 후보 프롬프트 추출 성공! (패턴: {pattern})")
-                    break
-                else:
-                    pattern_results.append(
-                        f"⚠️ {pattern}: 매칭되었으나 거부됨 ({', '.join(rejected_reason)})"
-                    )
-            else:
-                pattern_results.append(f"❌ {pattern}: 매칭 실패")
-
-        if not actual_candidate_text:
+        if not extraction_result.success:
             print(f"\n{'!'*80}")
             print("⚠️ [경고] 후보 프롬프트 추출 실패!")
             print(f"{'!'*80}")
@@ -1412,7 +1070,6 @@ def main():
             print(optimizer_response_text)
             print("-" * 80)
             print("\n→ 이번 iteration은 현재 프롬프트를 후보로 간주하고 비교를 계속합니다.\n")
-            actual_candidate_text = system_prompt.value
 
         print(f"\n[추출된 후보 프롬프트]")
         print(f"매칭 패턴: {matched_pattern or '[N/A]'}")
@@ -1478,7 +1135,15 @@ def main():
         # [Baseline] val_score_candidate >= val_score_current (동점 이상만 채택)
         # [Improve]  val_score_candidate >= val_score_current - ACCEPTANCE_TOLERANCE (노이즈 허용)
         #            → 데이터셋별로 validation_size에 맞게 experiment.py에서 설정
-        ACCEPTANCE_TOLERANCE = EXPERIMENT_INS.acceptance_tolerance
+        #            → improve는 iteration이 진행될수록 gap만큼 허용 오차를 점진 축소
+        base_tolerance = float(getattr(EXPERIMENT_INS, "acceptance_tolerance", 0.0))
+        tolerance_gap = float(getattr(EXPERIMENT_INS, "acceptance_tolerance_gap", 0.0))
+        ACCEPTANCE_TOLERANCE = max(0.0, base_tolerance - ((iteration - 1) * tolerance_gap))
+        print(
+            f"[Tolerance] iteration={iteration}, "
+            f"base={base_tolerance:.4f}, gap={tolerance_gap:.4f}, "
+            f"applied={ACCEPTANCE_TOLERANCE:.4f}"
+        )
 
         # 후보 프롬프트 비교 정보 - 다음 iteration의 backward JudgeLLM에게 컨텍스트로 전달
         # STEP_BEFORE: 이번 iteration 시작 시점의 현재 프롬프트 (채택 전)
@@ -1561,7 +1226,7 @@ def main():
             optimization_logs[idx]['validation_dataset_size'] = len(validation_dataset)
 
         print(f"\nIteration {iteration} 완료: 평균 점수 = {iteration_avg_score}")
-        print(f"현재 프롬프트: {system_prompt.value}")
+        print(f"iteration {iteration} prompt: {system_prompt.value}")
 
         # [즉시 저장] 이터레이션 1개 완료 즉시 DB에 저장 (중간 확인 / Ctrl+C 없이 보존)
         _do_db_save()
@@ -1581,6 +1246,8 @@ def main():
     else:
         print(f"\n[episode={final_episode}] 최종 프롬프트 Test Set 전체 평가 시성...")
         final_test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
+
+    final_test_prompt_iteration = global_best_iteration
 
     ##### 차별점 #####
     # [Improve] 최종 Test 직전 global best prompt로 스왑
@@ -1643,7 +1310,13 @@ def main():
         final_workers = min(test_eval_max_workers, len(final_test_dataset))
         with ThreadPoolExecutor(max_workers=final_workers) as executor:
             final_futures = [
-                executor.submit(_evaluate_single_test_sample, final_idx, final_data, "Final test input")
+                executor.submit(
+                    _evaluate_single_test_sample,
+                    final_idx,
+                    final_data,
+                    "Final test input",
+                    final_test_prompt_iteration,
+                )
                 for final_idx, final_data in enumerate(final_test_dataset)
             ]
 

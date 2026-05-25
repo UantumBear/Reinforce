@@ -1,60 +1,7 @@
 """
 @경로: main_textgrad_baseline.py
-@설명: TextGrad를 활용한 프롬프트 최적화 및 DB 저장
-- TextGrad 의 기본 논문 을 재현한다.
-- 추후 내가 설계한 다양한 Judge 모델과, 보상함수와도 연동할 수 있도록 구조화한다.
-- TextGrad의 'Step'을 'Episode' 컬럼으로 매핑하여, 각 최적화 단계별로 상세 로그를 DB에 저장한다.
-- 일단 내 연구의 최종 프레임워크가 어떻게 될 지는 모르겠으나,
-  TextGrad baseline 과, TextGrad + Judges+Reward 의 차이를 비교하고,
-  또 다른 OPRO 논문과의 비교도 추가하여,
-  각 연구논문 들 baseline 과, 그 상태에서 계층적 피드백을 주었을때의 차이를 비교하면 좋을 것 같다.
-
-- 2026.03.07 데이터 로그 적재 부 추가
-- 2026.03.30 논문 방식 Validation 캐싱 및 Forward 분기 구현
-    [변경 1] Validation 루프 - 현재 프롬프트 캐싱 방식 적용 (논문 근거)
-        이전: 매 iteration마다 현재 프롬프트 + 후보 프롬프트 둘 다 평가 (val_count × 2번 LLM 호출)
-        이후: Episode 시작 시 현재 프롬프트를 1회 평가해 캐시(cached_val_score_current),
-              매 iteration은 후보 프롬프트만 평가 (val_count × 1번),
-              프롬프트 채택 시 캐시 점수도 갱신하여 다음 iteration의 기준값으로 사용
-        근거: "기존 프롬프트의 점수는 이미 알고 있거나 캐싱되어 있으므로
-               새로운 후보 프롬프트에 대해서만 Validation 데이터셋 크기만큼 LLM을 호출" (논문)
-    [변경 2] Train Forward 분기 명확화
-        이전: for 루프로 test_time_updates번 무조건 반복 후 결과 합산
-        이후: if/else 분기로 완전히 분리
-              - GPQA/MMLU/HQH (is_multiple_choice and test_time_updates > 1):
-                  3회 생성 + Majority Voting → Accuracy (현재 실험에서는 실행되지 않는 분기, 구조만 유지)
-              - GSM8k / 그 외 (else):
-                  model(query_var) 단 1회 호출 (논문 기준 프롬프트 최적화 루프)
-                  GSM8k면 compute_gsm8k_accuracy, 그 외면 accuracy=None
-
-NULL(값 없음):
-    샘플 스킵(인젝션 패턴) 시 점수 필드
-    Judge 초기화 자체 실패로 해당 점수를 계산할 수 없는 경우
-NaN(계산 망가짐):
-    샘플 처리 예외로 평가가 깨진 경우
-    RAGAS 평가가 실행됐지만 내부 Evaluation error/예외가 난 경우
-    (유사도 호출에서 예외 발생 시도 NaN)
-
-[중요] context vs <CONTEXT> 태그의 차이
-====================================
-이 코드에서 "context"라는 용어가 두 가지 다른 의미로 사용됩니다:
-
-1. **데이터의 context** (RAG 문서 자료)
-   - 변수명: context, val_context
-   - 의미: RAG 챗봇에서 LLM에게 제공하는 문서 자료, 배경 정보
-   - 예시: NASA 센서 로그, KLUE 검색 결과, 뉴스 기사 등
-   - GSM8k 같은 수학 문제는 context가 없음 (빈 문자열)
-   - 사용처: Forward Model 입력 (답변 생성 LLM)
-   
-2. **TextGrad optimizer의 <CONTEXT> 태그** (이전 최적화 피드백)
-   - 의미: Optimizer LLM에게 주는 "이전 최적화 시도의 피드백 이력"
-   - 내용: "이전에 이런 프롬프트로 이런 문제를 풀었더니 이런 오답과 피드백이 나왔다"
-   - TextGrad 라이브러리가 자동으로 관리 (backward()로 생성된 gradient를 채움)
-   - 사용처: Optimizer LLM이 프롬프트를 개선할 때 참고
-   - 이 코드에서는 직접 조작하지 않음 (라이브러리 내부 처리)
-
-두 개념은 완전히 다르며, 혼동하지 않도록 주의가 필요합니다.
-====================================
+@설명: TextGrad를 활용한 프롬프트 최적화 
+@연관문서: docs/main_textgrad_baseline.md
 """
 DEBUG_INDIVIDUAL_BACKWARD = False # 디버그 모드
 
@@ -62,12 +9,10 @@ DEBUG_INDIVIDUAL_BACKWARD = False # 디버그 모드
 # [성능 프로파일링] 파일 실행 시작 시점 기록
 # ============================================================================
 import time
+from functools import partial
+from utils.log.printing import _print_elapsed
 _SCRIPT_START_TIME = time.time()
-
-def _print_elapsed(label):
-    """파일 시작부터 현재까지 경과 시간 출력"""
-    elapsed = time.time() - _SCRIPT_START_TIME
-    print(f"[⏱️  {elapsed:.2f}s] {label}")
+_print_elapsed = partial(_print_elapsed, program_start_time=_SCRIPT_START_TIME)
 
 
 import textgrad as tg
@@ -82,6 +27,7 @@ import random
 import atexit
 import traceback
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 _print_elapsed("기본 라이브러리 완료")
 
 _print_elapsed("textgrad 내부 모듈 import 시작")
@@ -124,6 +70,7 @@ _print_elapsed("나머지 utils 함수들 import 시작")
 from utils.llm_errors.error_parsers import extract_root_error_message
 from utils.llm_errors.error_debugger import debug_individual_backward_samples
 from utils.llm_safety.azure_prompt_filters import has_jailbreak_like_pattern
+from utils.prompt.candidate_prompt_extractor import CandidatePromptExtractor
 from utils.text.normalization import normalize_text_field
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from utils.llm_patches.textgrad_info import get_tgd_optimizer_system_prompt, stringify_tgd_update_prompt
@@ -136,7 +83,6 @@ from metrics.judges.gsm8k_judge import parse_integer_answer
 # 기타 LLM get 함수들
 from metrics.judges.similarity_judge import create_similarity_judge 
 from metrics.judges.ragas_failthfulness_judge import create_ragas_judge
-from metrics.prompts.textgrad_baseline_prompts import build_azure_safe_optimizer_system_prompt
 
 # Multiple-choice 평가 유틸리티 (GPQA/MMLU/HQH용)
 from metrics.judges.multiple_choice_judge import (
@@ -176,6 +122,13 @@ def main():
     # - 그 외 데이터셋: 1번 생성 (일반 RAG/생성 태스크)
     test_time_updates = EXPERIMENT_INS.get_test_time_updates()
     print(f"[✓] Test-time updates: {test_time_updates}번 (데이터셋: {EXPERIMENT_INS.default_dataset_name})")
+
+    test_eval_max_workers = 4
+    try:
+        test_eval_max_workers = max(1, int(os.getenv("TEXTGRAD_TEST_MAX_WORKERS", "4")))
+    except (TypeError, ValueError):
+        test_eval_max_workers = 4
+    print(f"[✓] Test 평가 병렬 워커 수: {test_eval_max_workers}")
     
     print_step("3. TextGrad 환경 설정 및 엔진 초기화")
     # TextGrad experiment_id 생성
@@ -185,34 +138,7 @@ def main():
     # ============================================================================
     # TextGrad 엔진 초기화: 2가지 역할로 나뉜 LLM
     # ============================================================================
-    # get_textgrad_*_engine()은 (engine, model_name) 튜플을 반환:
-    #   - engine: 실제 LLM API를 호출하는 실행 객체 (예: ChatOpenAI 인스턴스)
-    #   - model_name: 사용된 모델명 문자열 (예: "gpt-4o-mini") - DB 로그 기록용
-    
-    # 1️⃣ forward_engine (답변 생성자 LLM)
-    #    ┌─────────────────────────────────────────────────┐
-    #    │ 역할: 문제를 풀고 답변 생성 (단 1가지!)        │
-    #    │ 예시: "5 + 3 = 8개입니다"                      │
-    #    │ 사용처: model(query) 호출 시만                 │
-    #    └─────────────────────────────────────────────────┘
     forward_engine, textgrad_forward_model_nm = get_textgrad_forward_engine()
-    
-    # 2️⃣ backward_engine (선생님 LLM - 평가/피드백/최적화 모두 담당!)
-    #    ┌─────────────────────────────────────────────────────────────────┐
-    #    │ 역할 A: 평가 (Evaluation Forward)                             │
-    #    │   - TextLoss 사용 시: loss(prediction) 호출하면 이 엔진 사용  │
-    #    │   - 예시: "이 답변은 정확합니다. 10/10점"                      │
-    #    │   ★ 주의: forward_engine 아님!                                │
-    #    ├─────────────────────────────────────────────────────────────────┤
-    #    │ 역할 B: 피드백 생성 (Evaluation Backward)                     │
-    #    │   - loss.backward() 호출하면 이 엔진 사용                     │
-    #    │   - 예시: "프롬프트에 '단계별로 풀이하라' 추가 필요"          │
-    #    ├─────────────────────────────────────────────────────────────────┤
-    #    │ 역할 C: 프롬프트 개선 (Optimizer)                             │
-    #    │   - optimizer.step() 호출하면 이 엔진 사용                    │
-    #    │   - 예시: "문제를 풀어라" → "문제를 단계별로 풀어라"          │
-    #    └─────────────────────────────────────────────────────────────────┘
-    #    ★ 핵심: backward_engine 하나가 A, B, C 역할 모두 담당!
     backward_engine, textgrad_backward_model_nm = get_textgrad_backward_engine()
     
     # TextGrad 라이브러리에 backward_engine 전역 설정
@@ -225,21 +151,14 @@ def main():
     embedding_model_nm = similarity_judge.embedding_model_nm if similarity_judge else None
     print(f"[DEBUG] Similarity Judge 초기화: {similarity_judge is not None}")
     print(f"[DEBUG] Embedding Model Name: {embedding_model_nm}")
-    ragas_judge = create_ragas_judge()
+    ragas_judge = create_ragas_judge() if EXPERIMENT_INS.ragas_judge else None
     _print_elapsed("Judge 모델 초기화 완료")
     
     # 데이터셋 타입 감지 (accuracy 계산용)
     dataset_name_lower = EXPERIMENT_INS.default_dataset_name.lower()
     is_multiple_choice = any(keyword in dataset_name_lower for keyword in ['gpqa', 'mmlu', 'hqh'])
-    is_gsm8k = 'gsm8k' in dataset_name_lower
-    is_object_counting = 'object_counting' in dataset_name_lower
-    is_numeric_exact_match_dataset = is_gsm8k or is_object_counting
-    
-    print(
-        f"[✓] 데이터셋 타입: multiple_choice={is_multiple_choice}, "
-        f"gsm8k={is_gsm8k}, object_counting={is_object_counting}, "
-        f"numeric_exact_match={is_numeric_exact_match_dataset}"
-    )
+    is_numeric_exact_match_dataset = EXPERIMENT_INS.is_numeric_exact_match_dataset
+
     
     # [연구 로드맵] 현재는 TextGrad Baseline 재현 단계
     # 향후 발전 방향: tg.TextLoss(평가 지시문 문자열) 대신
@@ -266,12 +185,10 @@ def main():
     experiment_context = EXPERIMENT_INS.get_experiment_context()
     ###################
     
-    role_desc = f"system prompt to the language model\n{experiment_context}"
-    
     system_prompt = tg.Variable(
         initial_prompt, 
-        requires_grad=True, 
-        role_description=role_desc
+        requires_grad = True, 
+        role_description = f"system prompt to the language model\n{experiment_context}"
     )
 
     # [중요] BlackboxLLM: forward_engine(답변 생성자 LLM)을 감싼 wrapper
@@ -288,33 +205,9 @@ def main():
     # ============================================================================
     # 4. Optimizer 생성 - backward_engine(평가자 LLM)을 사용하여 프롬프트 개선
     # ============================================================================
-    # TextualGradientDescentwithMomentum:
-    # - parameters: 개선할 대상 (system_prompt)
-    # - engine: backward_engine(평가자 LLM) 사용
-    # - optimizer.step() 호출 시:
-    #   1. system_prompt.gradients에서 피드백(gradient) 가져오기
-    #   2. backward_engine에게 "이 피드백을 바탕으로 새 프롬프트 만들어줘" 요청
-    #   3. backward_engine이 개선된 프롬프트 생성
-    #   4. system_prompt 업데이트
-    # 
-    # 예: 피드백 "단계별 설명 필요" → backward_engine: "문제를 단계별로 풀어라"
-    
-    # 일반 옵티마이저 (비교/회귀 확인용)
-    # optimizer = tg.TGD(
-    #     parameters=list(model.parameters()),
-    #     engine=backward_engine,
-    #     gradient_memory=momentum_window,
-    # )
-
-    # 모멘텀 적용 옵티마이저 (논문 재현 경로)
-    # [Azure Content Filter 회피 전략]
-    # optimizer_system_prompt를 커스터마이징하여 건전한 최적화 가이드라인 제공
-
-    # TODO 아래 custom 프롬프트는 improve 실험 모드에서 사용할 것
-    # custom_optimizer_system_prompt = build_azure_safe_optimizer_system_prompt()
     
     optimizer = TextualGradientDescentwithMomentum(
-        parameters=list(model.parameters()),
+        parameters=list(model.parameters()), # parameters: 개선할 대상 (system_prompt)
         engine=backward_engine,  # ← backward_engine(평가자 LLM)이 프롬프트 개선!
         momentum_window=momentum_window,
         # optimizer_system_prompt=custom_optimizer_system_prompt,
@@ -322,6 +215,7 @@ def main():
     # optimizer(TGD): TextGrad의 텍스트 경사하강 업데이트기.
     # backward에서 나온 피드백을 입력으로 받아, 최적화 대상 변수(system_prompt.value)를 한 step씩 실제로 갱신한다.
     optimizer_system_prompt = get_tgd_optimizer_system_prompt(optimizer)
+    candidate_prompt_extractor = CandidatePromptExtractor()
     # 위 시스템 프롬프트 기본 버전에는 (라이브러리)
     #  <IMPROVED_VARIABLE> 이 태그 안에 응답을 생성해서 넣으라고 되어있음.
 
@@ -504,7 +398,6 @@ def main():
     atexit.register(_emergency_save)
 
     print(f"--- TextGrad Baseline Optimization (논문 재현) 시작 ---")
-    print(f"Total Iterations: {total_iterations}, Batch size: {batch_size}")
 
     # -----------------------------------------------------------------------
     # [논문 구현] 현재 프롬프트의 Validation 점수 초기 캐싱 (루프 진입 전 1회)
@@ -516,6 +409,7 @@ def main():
     print(f"\n[초기 캐싱] 초기 프롬프트 Validation 점수 평가...")
     cached_val_score_current = 0.0
     cached_val_count = 0
+    latest_prompt_iteration = 0
     initial_validation_info = {}  # 초기 프롬프트의 validation 샘플 정보
 
     if is_numeric_exact_match_dataset:
@@ -641,6 +535,46 @@ def main():
         print(f"\n[episode=0] 초기 프롬프트 Test Set 전체 평가 시작...")
         test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
 
+    def _evaluate_single_test_sample(sample_idx: int, sample_data: dict, role_description: str, prompt_iteration: int):
+        sample_context = normalize_text_field(sample_data.get('context', ''))
+        sample_question = normalize_text_field(sample_data.get('question', ''))
+        sample_gt = normalize_text_field(sample_data.get('answer', ''))
+        sample_persona = sample_data.get('system_persona', '')
+        sample_inputs = EXPERIMENT_INS.build_forward_input(sample_question, sample_context, sample_persona)
+
+        try:
+            sample_var = tg.Variable(sample_inputs, role_description=role_description, requires_grad=False)
+            sample_pred = model(sample_var).value
+
+            if is_numeric_exact_match_dataset:
+                pred_num = parse_integer_answer(sample_pred)
+                gt_num = parse_integer_answer(sample_gt)
+                sample_score = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
+            elif is_multiple_choice:
+                sample_score = similarity_judge(sample_gt, sample_pred) if similarity_judge else 0.0
+            else:
+                sample_score = similarity_judge(sample_gt, sample_pred) if similarity_judge else 0.0
+
+            sample_info = {
+                "Q": sample_question,
+                "A": sample_pred,
+                "GA": sample_gt,
+                "score": sample_score,
+                "prompt_iteration": prompt_iteration,
+            }
+            return sample_idx, sample_score, True, sample_info
+        except Exception as error:
+            root_error = extract_root_error_message(error)
+            sample_info = {
+                "Q": sample_question,
+                "A": "[ERROR]",
+                "GA": sample_gt,
+                "score": None,
+                "error": root_error,
+                "prompt_iteration": prompt_iteration,
+            }
+            return sample_idx, None, False, sample_info
+
     if test_dataset:
         base_log_ep0 = create_base_log(
             experiment_id, 0,
@@ -679,54 +613,33 @@ def main():
         optimization_logs.append(ep0_summary_log)
         _do_db_save()  # episode=0 summary row 최초 insert
 
-        for ep0_idx, ep0_data in enumerate(test_dataset, 1):
-            if ep0_idx % 50 == 0 or ep0_idx == 1:
-                print(f"  [episode=0] [{ep0_idx}/{len(test_dataset)}] 초기 프롬프트 Test 평가 중...")
-            ep0_context = normalize_text_field(ep0_data.get('context', ''))
-            ep0_question = normalize_text_field(ep0_data.get('question', ''))
-            ep0_gt = normalize_text_field(ep0_data.get('answer', ''))
-            ep0_persona = ep0_data.get('system_persona', '')
-            ep0_inputs = EXPERIMENT_INS.build_forward_input(ep0_question, ep0_context, ep0_persona)
+        ep0_workers = min(test_eval_max_workers, len(test_dataset))
+        with ThreadPoolExecutor(max_workers=ep0_workers) as executor:
+            ep0_futures = [
+                executor.submit(_evaluate_single_test_sample, ep0_idx, ep0_data, "Test input", 0)
+                for ep0_idx, ep0_data in enumerate(test_dataset)
+            ]
 
-            try:
-                ep0_var = tg.Variable(ep0_inputs, role_description="Test input", requires_grad=False)
-                ep0_pred = model(ep0_var).value
+            for completed_idx, future in enumerate(as_completed(ep0_futures), 1):
+                sample_idx, ep0_score_sample, success, sample_info = future.result()
+                ep0_test_info[str(sample_idx)] = sample_info
 
-                if is_numeric_exact_match_dataset:
-                    pred_num = parse_integer_answer(ep0_pred)
-                    gt_num = parse_integer_answer(ep0_gt)
-                    ep0_score_sample = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
-                elif is_multiple_choice:
-                    ep0_score_sample = similarity_judge(ep0_gt, ep0_pred) if similarity_judge else 0.0
-                else:
-                    ep0_score_sample = similarity_judge(ep0_gt, ep0_pred) if similarity_judge else 0.0
+                if success and ep0_score_sample is not None:
+                    ep0_score += ep0_score_sample
+                    ep0_count += 1
 
-                ep0_score += ep0_score_sample
-                ep0_count += 1
-                ep0_test_info[str(ep0_idx - 1)] = {
-                    "Q": ep0_question, "A": ep0_pred, "GA": ep0_gt, "score": ep0_score_sample
-                }
+                if completed_idx % 50 == 0 or completed_idx == 1:
+                    print(f"  [episode=0] [{completed_idx}/{len(test_dataset)}] 초기 프롬프트 Test 평가 중...")
 
-            except Exception as e:
-                root_error = extract_root_error_message(e)
-                ep0_test_info[str(ep0_idx - 1)] = {
-                    "Q": ep0_question,
-                    "A": "[ERROR]",
-                    "GA": ep0_gt,
-                    "score": None,
-                    "error": root_error,
-                }
-                continue
-
-            if ep0_idx % 100 == 0:
-                running_acc = ep0_score / ep0_count if ep0_count > 0 else 0.0
-                _update_test_summary_row(
-                    episode=0,
-                    test_info=ep0_test_info,
-                    test_accuracy=running_acc,
-                    test_dataset_size=len(test_dataset),
-                )
-                print(f"  [episode=0] 중간 저장 완료: {ep0_idx}/{len(test_dataset)} (acc={running_acc:.4f})")
+                if completed_idx % 100 == 0:
+                    running_acc = ep0_score / ep0_count if ep0_count > 0 else 0.0
+                    _update_test_summary_row(
+                        episode=0,
+                        test_info=ep0_test_info,
+                        test_accuracy=running_acc,
+                        test_dataset_size=len(test_dataset),
+                    )
+                    print(f"  [episode=0] 중간 저장 완료: {completed_idx}/{len(test_dataset)} (acc={running_acc:.4f})")
 
         ep0_accuracy = ep0_score / ep0_count if ep0_count > 0 else 0.0
         print(f"[episode=0] 완료: Test Set 정확도 = {ep0_accuracy:.4f} ({ep0_count}/{len(test_dataset)}개 평가)")
@@ -742,7 +655,7 @@ def main():
         # enable_test_evaluation=False 인 경우: 이미 위에서 skip 메시지 출력함
 
     # ========== [TextGrad 논문 재현 루프 시작] ==========
-    random.seed(42)  # train batch 재현성 보장 (실험 간 동일한 batch 순서)
+    random.seed(EXPERIMENT_INS.random_seed)  # [중앙 집중식] train batch 재현성 보장 (실험 간 동일한 batch 순서)
     for iteration in range(1, total_iterations + 1):
         print(f"\n{'='*80}")
         print(f"Iteration {iteration}/{total_iterations} 시작")
@@ -859,6 +772,7 @@ def main():
                 # evaluation_instruction 초기화 (StringBasedFunction 케이스에서는 None)
                 evaluation_instruction = None
                 
+                # ---------------------------- GSM8k정답 채점 부 ------------------------------------------
                 if is_numeric_exact_match_dataset and EXPERIMENT_INS.mode == 'baseline':
                     # [논문 재현] StringBasedFunction 사용:
                     # - Evaluation Forward: Python 함수로 0/1 계산 (backward_engine 호출 X, 비용 절감!)
@@ -892,12 +806,8 @@ def main():
                         print(f"[Warning] Failed to convert loss to accuracy: {computed_loss.value}")
                         
                 else:
-                    # [기존 방식] TextLoss 사용:
-                    # - Evaluation Forward: backward_engine(평가자 LLM)이 답변 평가하고 점수 생성
-                    # - Evaluation Backward: backward_engine(평가자 LLM)이 피드백 생성
-                    # 
-                    # 흐름: forward_engine이 답변 생성 → backward_engine이 평가 → backward_engine이 피드백
-                    # (총 LLM 호출 3번 vs StringBasedFunction은 2번 - 비용 1/3 절감!)
+                    # 이 자리가 목적함수 호출 부임을 표시하기 위해 get_objective_function 를 호출함.
+                    # (실제로 gsm8k+baseline 에서는 이 블록이 실행되지 않음)
                     evaluation_instruction = EXPERIMENT_INS.get_objective_function(ground_truth)
                     loss = tg.TextLoss(evaluation_instruction)
                     computed_loss = loss(prediction_var)  # ← backward_engine(평가자 LLM)이 평가
@@ -999,15 +909,10 @@ def main():
         # ============================================================================
         # Backward Pass: 평가자 LLM(backward_engine)이 피드백(gradient) 생성
         # ============================================================================
-        # 1. tg.sum()으로 배치 내 모든 loss 병합
-        # 2. backward() 호출 시:
-        #    - StringBasedFunction: backward_engine이 피드백 생성 (LLM 호출 1회)
-        #    - TextLoss: backward_engine이 피드백 생성 (LLM 호출 1회)
-        # 3. 생성된 피드백(gradient)은 system_prompt.gradients에 저장됨
-        # 
         # 예시 피드백: "프롬프트에 '단계별로 풀이하라'를 추가하세요"
-        total_loss = tg.sum(losses)
-        total_loss.backward()  # ← backward_engine(평가자 LLM)이 피드백 생성!
+        total_loss = tg.sum(losses) # 배치 내 모든 loss 병합
+        total_loss.backward()       # backward_engine(평가자 LLM)이 피드백 생성!
+        # 생성된 피드백(gradient)은 system_prompt.gradients에 저장됨
 
         # 3) 후보 프롬프트 생성 (optimizer.step() 전에 gradient 텍스트 백업)
         # system_prompt.get_gradient_text(): backward()에서 생성된 피드백 텍스트
@@ -1083,44 +988,18 @@ def main():
         print(optimizer_response_text)
         print(f"\n{'='*80}\n")
 
-        patterns = [
-            r"<new_variable>(.*?)</new_variable>",
-            r"<IMPROVED_VARIABLE>(.*?)</IMPROVED_VARIABLE>",
-            r"<refined_template>(.*?)</refined_template>",
-            r"<OPTIMIZER_WRITING_TEXT_START>(.*?)<OPTIMIZER_WRITING_TEXT_END>",
-            r"```(.*?)```",
-        ]
+        extraction_result = candidate_prompt_extractor.extract(
+            optimizer_response_text=optimizer_response_text,
+            fallback_prompt=system_prompt.value,
+        )
+        actual_candidate_text = extraction_result.candidate_text
+        matched_pattern = extraction_result.matched_pattern
+        pattern_results = extraction_result.pattern_match_logs
 
-        actual_candidate_text = None
-        matched_pattern = None
-        pattern_results = []
+        if extraction_result.success:
+            print(f"✅ 후보 프롬프트 추출 성공! (패턴: {matched_pattern})")
 
-        for pattern in patterns:
-            match = re.search(pattern, optimizer_response_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                candidate = match.group(1).strip()
-                rejected_reason = []
-                if not candidate:
-                    rejected_reason.append("빈 문자열")
-                if "{" in candidate:
-                    rejected_reason.append("중괄호 포함")
-                if "the improved variable" in candidate.lower():
-                    rejected_reason.append("placeholder 텍스트")
-
-                if not rejected_reason:
-                    actual_candidate_text = candidate
-                    matched_pattern = pattern
-                    pattern_results.append(f"✅ {pattern}: 매칭 성공 & 사용됨")
-                    print(f"✅ 후보 프롬프트 추출 성공! (패턴: {pattern})")
-                    break
-                else:
-                    pattern_results.append(
-                        f"⚠️ {pattern}: 매칭되었으나 거부됨 ({', '.join(rejected_reason)})"
-                    )
-            else:
-                pattern_results.append(f"❌ {pattern}: 매칭 실패")
-
-        if not actual_candidate_text:
+        if not extraction_result.success:
             print(f"\n{'!'*80}")
             print("⚠️ [경고] 후보 프롬프트 추출 실패!")
             print(f"{'!'*80}")
@@ -1135,7 +1014,6 @@ def main():
             print(optimizer_response_text)
             print("-" * 80)
             print("\n→ 이번 iteration은 현재 프롬프트를 후보로 간주하고 비교를 계속합니다.\n")
-            actual_candidate_text = system_prompt.value
 
         print(f"\n[추출된 후보 프롬프트]")
         print(f"매칭 패턴: {matched_pattern or '[N/A]'}")
@@ -1231,6 +1109,7 @@ def main():
             system_prompt.set_value(actual_candidate_text)
             # [캐시 갱신] 채택된 후보 프롬프트의 점수를 다음 iteration의 현재 점수로 사용
             cached_val_score_current = val_score_candidate
+            latest_prompt_iteration = iteration
             print(f"✅ Prompt accepted & Updated (val: {val_score_current:.3f} -> {val_score_candidate:.3f})")
         else:
             system_prompt.set_value(original_prompt_value)
@@ -1286,6 +1165,8 @@ def main():
         print(f"\n[episode={final_episode}] 최종 프롬프트 Test Set 전체 평가 시작...")
         final_test_dataset = EXPERIMENT_INS.load_test_data()  # type: ignore[assignment]
 
+    final_test_prompt_iteration = latest_prompt_iteration
+
     if final_test_dataset:
         base_log_final = create_base_log(
             experiment_id,
@@ -1325,59 +1206,42 @@ def main():
         optimization_logs.append(final_summary_log)
         _do_db_save()  # final summary row 최초 insert
 
-        for final_idx, final_data in enumerate(final_test_dataset, 1):
-            if final_idx % 50 == 0 or final_idx == 1:
-                print(f"  [episode={final_episode}] [{final_idx}/{len(final_test_dataset)}] 최종 프롬프트 Test 평가 중...")
-
-            final_context = normalize_text_field(final_data.get('context', ''))
-            final_question = normalize_text_field(final_data.get('question', ''))
-            final_gt = normalize_text_field(final_data.get('answer', ''))
-            final_persona = final_data.get('system_persona', '')
-            final_inputs = EXPERIMENT_INS.build_forward_input(final_question, final_context, final_persona)
-
-            try:
-                final_var = tg.Variable(final_inputs, role_description="Final test input", requires_grad=False)
-                final_pred = model(final_var).value
-
-                if is_numeric_exact_match_dataset:
-                    pred_num = parse_integer_answer(final_pred)
-                    gt_num = parse_integer_answer(final_gt)
-                    final_score_sample = 1.0 if (pred_num is not None and gt_num is not None and pred_num == gt_num) else 0.0
-                elif is_multiple_choice:
-                    final_score_sample = similarity_judge(final_gt, final_pred) if similarity_judge else 0.0
-                else:
-                    final_score_sample = similarity_judge(final_gt, final_pred) if similarity_judge else 0.0
-
-                final_test_score += final_score_sample
-                final_test_count += 1
-                final_test_info[str(final_idx - 1)] = {
-                    "Q": final_question,
-                    "A": final_pred,
-                    "GA": final_gt,
-                    "score": final_score_sample,
-                }
-            except Exception as e:
-                root_error = extract_root_error_message(e)
-                final_test_info[str(final_idx - 1)] = {
-                    "Q": final_question,
-                    "A": "[ERROR]",
-                    "GA": final_gt,
-                    "score": None,
-                    "error": root_error,
-                }
-
-            if final_idx % 100 == 0:
-                running_acc = final_test_score / final_test_count if final_test_count > 0 else 0.0
-                _update_test_summary_row(
-                    episode=final_episode,
-                    test_info=final_test_info,
-                    test_accuracy=running_acc,
-                    test_dataset_size=len(final_test_dataset),
+        final_workers = min(test_eval_max_workers, len(final_test_dataset))
+        with ThreadPoolExecutor(max_workers=final_workers) as executor:
+            final_futures = [
+                executor.submit(
+                    _evaluate_single_test_sample,
+                    final_idx,
+                    final_data,
+                    "Final test input",
+                    final_test_prompt_iteration,
                 )
-                print(
-                    f"  [episode={final_episode}] 중간 저장 완료: "
-                    f"{final_idx}/{len(final_test_dataset)} (acc={running_acc:.4f})"
-                )
+                for final_idx, final_data in enumerate(final_test_dataset)
+            ]
+
+            for completed_idx, future in enumerate(as_completed(final_futures), 1):
+                sample_idx, final_score_sample, success, sample_info = future.result()
+                final_test_info[str(sample_idx)] = sample_info
+
+                if success and final_score_sample is not None:
+                    final_test_score += final_score_sample
+                    final_test_count += 1
+
+                if completed_idx % 50 == 0 or completed_idx == 1:
+                    print(f"  [episode={final_episode}] [{completed_idx}/{len(final_test_dataset)}] 최종 프롬프트 Test 평가 중...")
+
+                if completed_idx % 100 == 0:
+                    running_acc = final_test_score / final_test_count if final_test_count > 0 else 0.0
+                    _update_test_summary_row(
+                        episode=final_episode,
+                        test_info=final_test_info,
+                        test_accuracy=running_acc,
+                        test_dataset_size=len(final_test_dataset),
+                    )
+                    print(
+                        f"  [episode={final_episode}] 중간 저장 완료: "
+                        f"{completed_idx}/{len(final_test_dataset)} (acc={running_acc:.4f})"
+                    )
 
         final_test_accuracy = final_test_score / final_test_count if final_test_count > 0 else 0.0
         print(
