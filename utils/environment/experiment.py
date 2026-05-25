@@ -12,20 +12,23 @@ textgrad_baseline.py 와 textgrad_improve.py 에서
 import os
 from typing import Literal, Tuple, List
 
-from metrics.prompts.textgrad_improve_prompts import TEXTGRAD_IMPROVE_PROMPT_V001
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from datafile.data_loader import load_dataset
+from datafile.gsm8k_data_preprocessor import load_gsm8k_test_dataset
 from agent.prompts.baseline_prompt import (
     GSM8K_INIT_PROMPT,
+    GSM8K_INIT_PROMPT_IMPROVE,
     GPQA_INIT_PROMPT,
     MMLU_INIT_PROMPT,
     DEFAULT_INIT_PROMPT
 )
 from reward.gsm8k_objective_func import (
     get_gsm8k_baseline_objective_function,
-    get_gsm8k_improve_objective_function,
     get_gsm8k_experiment_context,
 )
+
+from reward.improve_objective_func import get_improve_objective_function
+from textgrad.optimizer.optimizer import get_gradient_and_context_text
 
 
 
@@ -38,7 +41,6 @@ class TextGradExperiment:
         
         # 데이터셋별 최적화 설정
         test_time_updates = experiment.get_test_time_updates()  # GPQA/MMLU/HQH: 3, 그 외: 1
-        optimizer_prompt = experiment.get_optimizer_system_prompt()
         
         # 데이터 로드
         dataset, train_pool, validation_dataset = experiment.load_and_split_data()
@@ -80,6 +82,9 @@ class TextGradExperiment:
         self.mode = mode
         self.experiment_id_prefix = f"textgrad_{mode}"
         
+        # [중앙 집중식] 데이터셋 시드 - 모든 로드/분할/배치에서 사용
+        self.random_seed = 52  # 변경하면 모든 곳에 자동 반영됨 ( 42)
+        
         # 실험 설정값 (환경변수 기본값)
         self._load_experiment_config()
     
@@ -105,12 +110,21 @@ class TextGradExperiment:
         # 데이터셋 이름 설정
         # self.default_dataset_name = "nasa/cmapss-fd001"  # NASA dataset (기존)
         # self.default_dataset_name = "Idavidrein/gpqa-diamond"  # GPQA Diamond - 가장 높은 품질의 문제 (448개)
-        self.default_dataset_name = "openai/gsm8k"  # GSM8k - Grade School Math 8K (논문 재현)
+
+        # FIX-1 : 논문재현 및 비교 1
+        # self.default_dataset_name = "openai/gsm8k"  # GSM8k - Grade School Math 8K (논문 재현)
+        
+        # FIX-2 : 논문재현 및 비교 2
+        self.default_dataset_name = "lukaemon/bbh/object_counting"  # BBH Object Counting - BBH의 객체 수 세기 태스크 (논문 재현 및 개선 모두에서 사용)
+        # FIX-3 : 신규 데이터로 실험 
+        # self.default_dataset_name = "telagentbench"  # SKT TelAgentBench - 통신/에이전트 벤치마크 데이터셋
 
         # [설계 방침] episode 개념 없음
         # TextGrad 논문에는 episode 개념이 없고, iteration(step) 단위로만 진행됩니다.
         # DB의 episode 컬럼에는 iteration 번호와 동일한 값이 저장됩니다. (episode == iteration)
         # 데이터셋별 설정 분기
+        # [기본값] RAGAS 평가는 필요 데이터셋에서만 켜고, 기본은 활성화로 둔다.
+        self.ragas_judge = True
         dataset_name_lower = self.default_dataset_name.lower()
         
         if 'gsm8k' in dataset_name_lower:
@@ -118,14 +132,35 @@ class TextGradExperiment:
             self.default_iterations = 12  # 논문 기준 총 iteration 횟수
             self.default_batch_size = 3
             self.default_total_sample_size = 200  # Train
-            self.default_validation_size = 3   # TODO Validation (논문 재현) : 300
+            self.default_validation_size = 50    # 논문: 300, 비용 절감을 위해 축소
+            self.ragas_judge = False  # GSM8k은 RAG 없이 순수 생성 태스크이므로 ragas=False로 설정
+            # -- improve --
+            self.acceptance_tolerance = 0.09  # 50*0.1 = 5 샘플 노이즈 허용
+            self.acceptance_tolerance_gap = 0.005
             
-        elif any(keyword in dataset_name_lower for keyword in ['object_counting', 'word_sorting', 'bbh']):
-            # Object Counting & Word Sorting (Big-Bench Hard)
-            self.default_iterations = 12  # 논문 기준 총 iteration 횟수
+
+        elif 'lukaemon/bbh' in dataset_name_lower or 'object_counting' in dataset_name_lower or 'word_sorting' in dataset_name_lower:
+            # BBH Object Counting / Word Sorting
+            # 논문 세팅: Train 50-51, Validation 100, Iterations 12, Batch 3
+            self.default_iterations = 12
             self.default_batch_size = 3
-            self.default_total_sample_size = 50   # Train (50-51개)
-            self.default_validation_size = 100    # Validation
+            self.default_total_sample_size = 51 # 절대 바꾸지 말 것 (논문 재현용)
+            self.default_validation_size = 50  # 논문: 100, 비용 절감을 위해 축소
+            self.ragas_judge = False  # BBH는 RAG 없이 순수 생성 태스크이므로 ragas=False로 설정
+            # -- improve --
+            self.acceptance_tolerance = 0.09  # 50*0.1 = 5 샘플 노이즈 허용
+            self.acceptance_tolerance_gap = 0.005
+            
+
+        elif 'telagentbench' in dataset_name_lower:
+            # SKT TelAgentBench: 통신/에이전트 벤치마크 데이터셋
+            # [주의] 논문 고정 세팅이 없으므로 초기 실험용 보수적 기본값 사용
+            self.default_iterations = 12
+            self.default_batch_size = 3
+            self.default_total_sample_size = 200
+            self.default_validation_size = 3
+            # validation_size=3 → 1샘플=0.33, 샘플 노이즈 크므로 동점만 허용
+            self.acceptance_tolerance = 0.0
             
         else:
             # 기타 데이터셋 (GPQA, MMLU, NASA 등) - 논문에 명시되지 않은 경우
@@ -133,14 +168,22 @@ class TextGradExperiment:
             self.default_iterations = int(os.getenv("TEXTGRAD_ITERATIONS_PER_EPISODE", "2"))
             self.default_batch_size = int(os.getenv("TEXTGRAD_BATCH_SIZE", "1"))
             self.default_total_sample_size = 20   # Train
-            self.default_validation_size = 5      # Validation
+            self.default_validation_size = 3      # Validation
+            self.acceptance_tolerance = 0.0
         
         self.default_initial_prompt = ""
+
+        # [Test 평가 제어]
+        # True: episode=0(초기) 및 최종 Test Set 전체 평가 실행 (1,319개 × 2회)
+        # False: Test 평가 생략 → 개발/디버깅 시 시간 절약용
+        # ★ baseline / improve 공통 플래그
+        self.enable_test_evaluation = True  # 1000개 이상의 테스트셋 테스트 건너뛰고 싶은 경우 False 로 설정
         
         print(f"[✓] 데이터셋별 설정 적용: {self.default_dataset_name}")
         print(f"    - Total Iterations: {self.default_iterations}")
         print(f"    - Batch Size: {self.default_batch_size}")
         print(f"    - Train: {self.default_total_sample_size}개, Validation: {self.default_validation_size}개")
+        print(f"    - Acceptance Tolerance: {self.acceptance_tolerance} (1샘플={1/self.default_validation_size:.4f})")
 
     def load_and_split_data(self) -> Tuple[List, List, List]:
         """
@@ -159,21 +202,52 @@ class TextGradExperiment:
         dataset = load_dataset(
             dataset_name=self.default_dataset_name,
             sample_size=self.default_total_sample_size + self.default_validation_size,
-            random_seed=42
-        ) # random_seed로 셔플된 데이터 반환
-        
+            random_seed=self.random_seed  # [중앙 집중식] 시드 사용
+        )
         if not dataset:
             raise ValueError(f"데이터 로드 실패: {self.default_dataset_name}")
-        
-        # Train/Validation 분할 (이미 셔플되어 있으므로 바로 슬라이싱)
+
+        # Train/Validation 분할 (data_loader가 반환한 순서를 기준으로 슬라이싱)
         train_pool = dataset[:self.default_total_sample_size]
         validation_dataset = dataset[self.default_total_sample_size:self.default_total_sample_size + self.default_validation_size]
+
+        if not train_pool or not validation_dataset:
+            raise ValueError(
+                f"데이터 로드/분할 실패: {self.default_dataset_name} "
+                f"(train={len(train_pool)}, validation={len(validation_dataset)})"
+            )
         
         print(f"[✓] Train pool: {len(train_pool)}개, Validation: {len(validation_dataset)}개")
         
         return dataset, train_pool, validation_dataset  
-        
-    
+
+    def load_test_data(self) -> List:
+        """
+        전체 Test 데이터셋을 로드한다. (초기/최종 성능 측정용 - Apple-to-Apple 비교)
+
+        @논문 근거:
+            TextGrad 논문에서는 최적화 전/후 비교를 동일한 Test Set(GSM8k 1,319개)으로 측정합니다.
+            현재 최적화 루프는 Validation Set(300개)을 기준으로 프롬프트 채택/거절을 결정하므로,
+            이 함수로 로드한 Test Set은 그 평가와는 별개로 논문 기준 성능 비교에 사용됩니다.
+
+        @Return:
+            Test 데이터셋 리스트 (전체, 셔플 없음)
+
+        @지원 데이터셋:
+            - GSM8k: test.csv (1,319개)
+            - 기타: 미지원 (빈 리스트 반환 후 경고)
+        """
+        dataset_name_lower = self.default_dataset_name.lower()
+
+        if 'gsm8k' in dataset_name_lower:
+            # 빠른 테스트를 위해서는 일단은 sample_size = 200 정도로 줄여서 실행 (원본:None)
+            test_dataset = load_gsm8k_test_dataset(sample_size=None, random_seed=self.random_seed)  # [중앙 집중식] 시드 사용
+            print(f"[✓] Test 데이터셋 로드 완료: {len(test_dataset)}개 (GSM8k test split)")
+            return test_dataset
+        else:
+            print(f"[!] load_test_data: '{self.default_dataset_name}'는 Test split 로드를 지원하지 않습니다. 빈 리스트 반환.")
+            return []
+
     def get_test_time_updates(self) -> int:
         """
         데이터셋에 따른 test-time updates 횟수를 반환한다.
@@ -201,31 +275,23 @@ class TextGradExperiment:
         # 그 외 데이터셋은 1번 (기본 생성)
         return 1
     
-    def get_optimizer_system_prompt(self) -> str | None:
-        """
-        OptimizerLLM 시스템 프롬프트를 반환한다.
-        
-        @Return:
-            - baseline: None (라이브러리 기본 시스템 프롬프트 사용)
-            - improve: 구조적 언어 피드백 적용 커스텀 프롬프트
-        """
-        if self.mode == 'baseline':
-            return None  # 라이브러리 기본값 사용
-        elif self.mode == 'improve':
-            return TEXTGRAD_IMPROVE_PROMPT_V001
-    
     def get_initial_prompt(self) -> str:
         """
-        데이터셋에 맞는 초기 프롬프트를 반환한다.
+        데이터셋과 모드에 맞는 초기 프롬프트를 반환한다.
         
         @논문 근거:
             TextGrad 논문에서는 각 태스크별로 task-specific initial prompt를 설정하여
             최적화의 출발점을 제공합니다. 빈 프롬프트로 시작하면 optimizer가 참고할 
             "현재 버전"이 없어 최적화가 비효율적일 수 있습니다.
         
+        @차별점:
+            - baseline: 논문 재현을 위해 형식이 포함된 초기 프롬프트 사용
+            - improve: OptimizerLLM의 자유도를 높이기 위해 단순화된 초기 프롬프트 사용
+        
         @Return:
-            데이터셋에 적합한 초기 프롬프트 문자열
-            - GSM8k: 수학 문제 풀이용 step-by-step 프롬프트
+            데이터셋과 모드에 적합한 초기 프롬프트 문자열
+            - GSM8k (baseline): 수학 문제 풀이용 step-by-step 프롬프트 (형식 포함)
+            - GSM8k (improve): 단순화된 프롬프트 (OptimizerLLM이 형식 학습)
             - GPQA/MMLU: 객관식 문제용 프롬프트
             - 그 외: 일반 RAG용 기본 프롬프트
         """
@@ -233,7 +299,10 @@ class TextGradExperiment:
         
         # GSM8k: 수학 문제
         if 'gsm8k' in dataset_name_lower:
-            return GSM8K_INIT_PROMPT
+            if self.mode == 'baseline':
+                return GSM8K_INIT_PROMPT  # 형식 포함 (논문 재현)
+            elif self.mode == 'improve':
+                return GSM8K_INIT_PROMPT_IMPROVE  # 단순화 (OptimizerLLM 학습)
         
         # GPQA: Graduate-level science questions
         elif 'gpqa' in dataset_name_lower:
@@ -281,7 +350,14 @@ class TextGradExperiment:
             "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
         )
     
-    def get_objective_function(self, ground_truth: str, similarity_score: float | None = None) -> str:
+    def get_objective_function(
+        self,
+        ground_truth: str,
+        similarity_score: float | None = None,
+        accuracy_score: float | None = None,
+        prediction: str | None = None,
+        previous_rejection_context: str = "",
+    ) -> str:
         """
         데이터셋과 실험 모드에 맞는 Objective Function(평가 지시문)을 반환한다.
         
@@ -294,28 +370,38 @@ class TextGradExperiment:
         @Args:
             ground_truth: 정답 (Reference Answer)
             similarity_score: gold answer와 현재 예측 간 semantic similarity 참고값
+            accuracy_score: 정답 일치 여부(0.0/1.0) 참고값
+            prediction: TesterLLM이 생성한 전체 사고 과정 (Chain of Thought 텍스트)
         
         @Return:
             Objective Function 문자열 (TextLoss에 전달할 평가 지시문)
         """
         dataset_name_lower = self.default_dataset_name.lower()
-        
-        # GSM8k 데이터셋
-        if 'gsm8k' in dataset_name_lower:
-            if self.mode == 'baseline':
-                return get_gsm8k_baseline_objective_function(ground_truth)
-            elif self.mode == 'improve':
-                # Improve 모드에서만 similarity_score를 참고 지표로 전달
-                return get_gsm8k_improve_objective_function(ground_truth, similarity_score=similarity_score)
-        
-        # 기타 데이터셋 (GPQA, MMLU, NASA 등)
+
+        if self.mode == 'improve':
+            # Improve 모드에서만 similarity_score와 prediction(Chain of Thought)을 함께 전달
+            # 미사용:  self._build_hierarchical_evaluation_instruction(ground_truth, similarity_score=similarity_score)
+            print("get_improve_objective_function 를 목적 함수로 사용합니다.")
+            return get_improve_objective_function(
+                ground_truth,
+                similarity_score=similarity_score,
+                accuracy_score=accuracy_score,
+                student_raw_trajectory=prediction,
+                previous_rejection_context=previous_rejection_context,
+            )
         else:
-            if self.mode == 'baseline':
-                return self._build_baseline_evaluation_instruction(ground_truth)
-            elif self.mode == 'improve':
-                return self._build_hierarchical_evaluation_instruction(ground_truth, similarity_score=similarity_score)
+            # GSM8k 데이터셋
+            if 'gsm8k' in dataset_name_lower:
+                if self.mode == 'baseline':
+                    print("gsm8k 은 목적함수를 두지 않습니다.")
+                    return None
+            elif 'object_counting' in dataset_name_lower:
+                if self.mode == 'baseline':
+                    print("object_counting 은 목적함수를 두지 않습니다.")
+                    return None
+                
+            # 기타 데이터셋 (GPQA, MMLU, NASA 등)
             else:
-                # fallback: baseline 방식
                 return self._build_baseline_evaluation_instruction(ground_truth)
     
     def get_experiment_context(self) -> str:
@@ -342,7 +428,36 @@ class TextGradExperiment:
         else:
             # 기타 데이터셋은 기본 컨텍스트 반환
             return ""
-    
+
+    def build_forward_input(self, question: str, context: str, system_persona: str = "") -> str:
+        """
+        Forward Model(답변 생성자)에게 전달할 입력 문자열을 구성합니다.
+
+        데이터셋별로 입력 포맷이 다릅니다:
+          - TelAgentBench: [Persona & Rules] + [Available Tools] + [User Utterance] 구조
+          - GSM8k / 기타: 기존 "Context: ...\nQuestion: ..." 또는 "Question: ..." 형식 (변경 없음)
+
+        @param question: 사용자 발화 (TelAgentBench: conversation에서 추출한 user 메시지)
+        @param context: 배경 자료 (TelAgentBench: functions+metadata, GSM8k: 빈 문자열)
+        @param system_persona: 고객 페르소나 + 응답 규칙 (TelAgentBench 전용, 그 외 빈 문자열)
+        @return: Forward Model에 전달할 최종 입력 문자열
+        """
+        dataset_name_lower = self.default_dataset_name.lower()
+
+        if 'telagentbench' in dataset_name_lower and system_persona:
+            # TelAgentBench: 페르소나/규칙 + 함수 목록 + 사용자 발화를 명확히 구분
+            parts = [f"[Persona & Rules]\n{system_persona}"]
+            if context.strip():
+                parts.append(f"[Available Tools]\n{context}")
+            parts.append(f"[User Utterance]\n{question}")
+            return "\n\n".join(parts)
+        else:
+            # GSM8k / 기타: 기존 방식 그대로 (영향 없음)
+            if context.strip():
+                return f"Context: {context}\nQuestion: {question}"
+            else:
+                return f"Question: {question}"
+
     def extract_feedback_str(self, system_prompt, optimization_logs: list = None, iteration_log_start_idx: int = None) -> str:
         """
         backward() 실행 후 생성된 프롬프트 피드백을 추출한다.
@@ -357,12 +472,12 @@ class TextGradExperiment:
             - improve: gradient + 샘플 비평을 3계층 구조화
         """
         if self.mode == 'baseline':
-            # Baseline: 단순 gradient 텍스트만 반환
-            return system_prompt.get_gradient_text().strip() or "[N/A]"
+            # Baseline: gradient + <CONVERSATION> 컨텍스트 포함 텍스트 반환
+            return str(get_gradient_and_context_text(system_prompt)).strip() or "[N/A]"
         
         elif self.mode == 'improve':
             # Improve: 계층형 피드백 구조
-            gradient_text = system_prompt.get_gradient_text()
+            gradient_text = str(get_gradient_and_context_text(system_prompt))
             
             # 샘플 비평 수집
             sample_feedbacks: list[str] = []
@@ -393,128 +508,35 @@ class TextGradExperiment:
             cleaned_gradient = gradient_text.strip() or "[N/A] TextGrad prompt feedback is empty."
             
             return (
-                "[Layer A: TextGrad Gradient]\n"
+                "<프롬프트 개선 방향>\n"
                 f"{cleaned_gradient}\n\n"
-                "[Layer B: Sample Critiques]\n"
+                "</프롬프트 개선 방향>\n\n"
+                "<각 Train Sample 피드백>\n"
                 f"{sample_feedback_block}\n\n"
-                "[Layer C: Prompt Rewrite Directives]\n"
-                "- 사실 정확도와 정답 일치도를 최우선으로 유지\n"
-                "- 문맥에 없는 추론은 금지하고 근거 부족 시 명시\n"
-                "- 불필요한 장황함을 줄이고 핵심 답변을 우선 제시"
+                "</각 Train Sample 피드백>\n"
             )
         
         else:
             # fallback: baseline 방식
             return system_prompt.get_gradient_text().strip() or "[N/A]"
-    
-    
-    # def build_evaluation_instruction(self, ground_truth: str) -> str:
-    #     """
-    #     답변 평가용 지시문을 생성한다 (TextLoss에 전달).
         
-    #     @Args:
-    #         ground_truth: 모범답안 (정답)
-        
-    #     @Return:
-    #         - baseline: 단순 4가지 기준 평가
-    #         - improve: 계층형 3-Layer rubric 평가
-    #     """
-    #     if self.mode == 'baseline':
-    #         return self._build_baseline_evaluation_instruction(ground_truth)
-    #     elif self.mode == 'improve':
-    #         return self._build_hierarchical_evaluation_instruction(ground_truth)
     
-    # def _build_baseline_evaluation_instruction(self, ground_truth: str) -> str:
-    #     """Baseline: 단순 평가 기준 (TextGrad 논문 방식)"""
-    #     return (
-    #         "You are a critical and rigorous evaluator for RAG systems. "
-    #         "Your task is to examine the predicted answer step-by-step and identify potential flaws.\n\n"
-    #         f"**Reference Answer:** {ground_truth}\n\n"
-    #         "**Evaluation Criteria:**\n"
-    #         "1. Does the prediction fully address the question based on the given context?\n"
-    #         "2. Are there any factual inaccuracies or hallucinations?\n"
-    #         "3. Is the reasoning clear and logically sound?\n"
-    #         "4. What specific improvements would make this answer better?\n\n"
-    #         "Provide concise, actionable feedback focused on how to improve the answer generation prompt."
-    #     )
+    # ------------------------------- 실험 Config 관리 -------------------------------
+    @property
+    def is_numeric_exact_match_dataset(self) -> bool:
+        dataset_name_lower = self.default_dataset_name.lower()
+
+        is_gsm8k = 'gsm8k' in dataset_name_lower
+        is_object_counting = 'object_counting' in dataset_name_lower
+
+        is_numeric_exact_match_dataset = is_gsm8k or is_object_counting
+
+        print(
+            f"[✓] 데이터셋 타입: "
+            f"gsm8k={is_gsm8k}, object_counting={is_object_counting}, "
+            f"numeric_exact_match={is_numeric_exact_match_dataset}"
+        )
+
+        return is_numeric_exact_match_dataset
     
-    # def _build_hierarchical_evaluation_instruction(self, ground_truth: str) -> str:
-    #     """Improve: 계층형 rubric (3-Layer 구조)"""
-    #     return (
-    #         f"[Ground Truth]\n{ground_truth}\n\n"
-    #         "[Layer 1: Fact Alignment]\n"
-    #         "- 정답 대비 사실 오류, 누락, 환각 가능성을 먼저 지적하세요.\n"
-    #         "[Layer 2: Context Grounding]\n"
-    #         "- 답변의 핵심 주장별로 문맥 근거 유무를 짚어주세요.\n"
-    #         "[Layer 3: Expression Quality]\n"
-    #         "- 간결성, 명확성, 논리 흐름 개선점을 제안하세요.\n"
-    #         "출력 형식: (1) 치명 오류 3개 이내 (2) 즉시 적용 가능한 개선 지시 3개"
-    #     )
-    
-    # def should_compact_gradients(self) -> bool:
-    #     """
-    #     Gradient 압축 활성화 여부를 반환한다.
-        
-    #     @Return:
-    #         - baseline: False (압축 안 함)
-    #         - improve: True (구조적 언어 피드백 적용을 위해 압축)
-    #     """
-    #     return self.mode == 'improve'
-    
-    # def should_use_hierarchical_feedback(self) -> bool:
-    #     """
-    #     계층적 피드백 구조 사용 여부를 반환한다.
-        
-    #     @Return:
-    #         - baseline: False (단순 gradient 텍스트 사용)
-    #         - improve: True (build_hierarchical_prompt_feedback 사용)
-    #     """
-    #     return self.mode == 'improve'
-    
-    # def get_episodes(self) -> int:
-    #     """환경변수 또는 기본값에서 Episodes 수를 가져온다."""
-    #     return int(os.getenv("TEXTGRAD_EPISODES", str(self.default_episodes)))
-    
-    # def get_iterations_per_episode(self) -> int:
-    #     """환경변수 또는 기본값에서 Iterations/Episode 수를 가져온다."""
-    #     return int(os.getenv("TEXTGRAD_ITERATIONS_PER_EPISODE", str(self.default_iterations)))
-    
-    # def get_batch_size(self) -> int:
-    #     """환경변수 또는 기본값에서 Batch size를 가져온다."""
-    #     return int(os.getenv("TEXTGRAD_BATCH_SIZE", str(self.default_batch_size)))
-    
-    # def get_dataset_name(self) -> str:
-    #     """실험 모드별 기본 데이터셋 이름을 반환한다."""
-    #     return os.getenv("TEXTGRAD_DATASET", self.default_dataset)
-    
-    # def get_total_sample_size(self) -> int:
-    #     """환경변수 또는 기본값에서 Train pool 크기를 가져온다."""
-    #     return int(os.getenv("TEXTGRAD_TOTAL_SAMPLES", str(self.default_total_samples)))
-    
-    # def get_validation_size(self) -> int:
-    #     """환경변수 또는 기본값에서 Validation set 크기를 가져온다."""
-    #     return int(os.getenv("TEXTGRAD_VALIDATION_SIZE", str(self.default_validation_size)))
-    
-    # def get_initial_prompt(self) -> str:
-    #     """실험 모드별 초기 시스템 프롬프트를 반환한다."""
-    #     return self.default_initial_prompt
-    
-    # def get_experiment_id(self, timestamp: str) -> str:
-    #     """
-    #     실험 ID를 생성한다.
-        
-    #     @Args:
-    #         timestamp: datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-    #     @Return:
-    #         예: "textgrad_baseline_20260324_143022"
-    #     """
-    #     return f"{self.experiment_id_prefix}_{timestamp}"
-    
-    # def __repr__(self) -> str:
-    #     return (
-    #         f"TextGradExperiment(mode='{self.mode}', "
-    #         f"episodes={self.get_episodes()}, "
-    #         f"batch_size={self.get_batch_size()}, "
-    #         f"dataset='{self.get_dataset_name()}')"
-    #     )
+   
