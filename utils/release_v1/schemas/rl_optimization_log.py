@@ -9,7 +9,7 @@
 
 import math
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -33,6 +33,7 @@ class RlOptimizationLogSchema(BaseModel):
     
     # 실험 메타데이터
     dataset_size: Optional[int] = None
+    train_batch_size: Optional[int] = None
     avg_total_score: Optional[float] = None
     dataset_nm: Optional[str] = None  # 데이터셋 이름
     
@@ -63,6 +64,11 @@ class RlOptimizationLogSchema(BaseModel):
     
     # Accuracy 점수 (정확도, 0.0 ~ 1.0 범위)
     accuracy: Optional[float] = None
+
+    # Test 관련 컬럼
+    test_info: Optional[Dict[str, Any]] = None
+    test_accuracy: Optional[float] = None
+    test_dataset_size: Optional[int] = None
     
     # 분석 및 피드백
     critical_review: Optional[str] = None  # 프롬프트 최적화 관점 피드백
@@ -71,6 +77,10 @@ class RlOptimizationLogSchema(BaseModel):
     # Optimizer LLM 관련
     optimizer_system_prompt: Optional[str] = None
     optimizer_total_input: Optional[str] = None
+    
+    # Backward Judge (비평가 엔진) 관련
+    evaluation_instruction: Optional[str] = None  # 비평가 엔진에게 전달하는 평가 기준
+    backward_judge_total_input: Optional[str] = None  # 비평가 엔진에게 전달되는 전체 입력
     
     # 실행 상태
     is_success: bool = True
