@@ -15,7 +15,7 @@ from typing import Literal, Tuple, List
 from utils.llm_patches.textgrad_patches import patch_textgrad_openai_compatibility, patch_textgrad_momentum_compatibility
 from datafile.data_loader import load_dataset
 from datafile.gsm8k_data_preprocessor import load_gsm8k_test_dataset
-from agent.prompts.baseline_prompt import (
+from metrics.prompts.baseline_prompt import (
     GSM8K_INIT_PROMPT,
     GSM8K_INIT_PROMPT_IMPROVE,
     GPQA_INIT_PROMPT,
@@ -56,9 +56,11 @@ class TextGradExperiment:
     @classmethod
     def apply_patches(cls):
         """
-        TextGrad 라이브러리 패치를 적용한다. (한 번만 실행됨)
-        textgrad 0.1.8 ver 의 버그를 패치하는 용도로, 최상위에서 실행해야 한다.
-        (라이브러리 자체를 갈아끼우는 방식)
+            TextGrad 라이브러리 패치를 적용한다. (한 번만 실행됨)
+            textgrad 0.1.8 ver 의 버그를 패치하는 용도로, 최상위에서 실행해야 한다.
+            (라이브러리 자체를 갈아끼우는 방식)
+            단순히 TextGradExperiment 객체 하나를 초기화하는 게 아니라, 
+            외부 라이브러리인 TextGrad의 전역 동작을 바꾸는 monkey patch 이다. 
         """
         if cls._patches_applied:
             return
@@ -132,7 +134,7 @@ class TextGradExperiment:
             self.default_iterations = 12  # 논문 기준 총 iteration 횟수
             self.default_batch_size = 3
             self.default_total_sample_size = 200  # Train
-            self.default_validation_size = 50    # 논문: 300, 비용 절감을 위해 축소
+            self.default_validation_size = 5    # 논문: 300, 비용 절감을 위해 축소
             self.ragas_judge = False  # GSM8k은 RAG 없이 순수 생성 태스크이므로 ragas=False로 설정
             # -- improve --
             self.acceptance_tolerance = 0.09  # 50*0.1 = 5 샘플 노이즈 허용
