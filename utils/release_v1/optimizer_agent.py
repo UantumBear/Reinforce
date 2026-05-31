@@ -8,7 +8,7 @@
 - (※ 반환된 Action은 Main Loop가 받아 Env에 적용한다.)
 """
 import dspy
-from agent.prompts.optimizer_llm import OPTIMIZER_SYSTEM_PROMPT, OPTIMIZER_SYSTEM_PROMPT2
+from utils.release_v1.optimizer_llm import OPTIMIZER_SYSTEM_PROMPT, OPTIMIZER_SYSTEM_PROMPT2
 from infrastructure.llm_client import get_optimizer_llm
 
 """

@@ -25,7 +25,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 # 1. [Module Imports]
 from infrastructure.llm_client import setup_lms
 from model.rag_module import RAG_CoT
-from agent.optimizer_agent import PromptOptimizerAgent
+from utils.release_v1.optimizer_agent import PromptOptimizerAgent
 
 
 # 보상
