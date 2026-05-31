@@ -17,7 +17,7 @@ from datetime import datetime
 import pandas as pd 
 from pathlib import Path
 from utils.log.console import print_step
-from models.rl_optimization_log import RlOptimizationLog
+from db.models.rl_optimization_log import RlOptimizationLog
 from db.connection.pg_client import pg_client
 from conf.config import Settings
 
@@ -134,7 +134,8 @@ class VerbalReinforceOptimizer(Teleprompter):
                         trainset, 
                         episode=ep_num, 
                         instruction=instruction_to_test,
-                        ep_start_time=episode_start_time
+                        ep_start_time=episode_start_time,
+                        agent=self.agent  # OptimizerLLM 정보 추가
                     )
                     
                     print(f"    [Result] Score: {score:.2f}")
@@ -166,7 +167,20 @@ class VerbalReinforceOptimizer(Teleprompter):
                     self._log_failure(ep_num, inst_log, str(e), ep_start_time=episode_start_time)
                     
                     # Agent에게 에러 피드백 주입 (다음 턴에 반영하도록)
-                    state["fail_case_feedback"] = f"[SYSTEM ERROR] {str(e)}"
+                    # 구조화된 피드백으로 에러 정보 전달
+                    state["verbal_feedback"] = f"""
+[System] RAG 시스템 프롬프트 최적화 - Episode {ep_num} 에러 발생
+
+[Error Information]
+- 에러 발생 Episode: {ep_num}
+- 에러 메시지: {str(e)}
+- 실패한 프롬프트: {inst_log[:200] if 'inst_log' in locals() else 'Unknown'}...
+
+[Action Required]
+위 에러를 피할 수 있도록 안전한 지시문을 작성하여 다시 시도하세요.
+"""
+                    # 실패 케이스 요약도 함께 업데이트
+                    state["fail_case_feedback"] = f"[SYSTEM ERROR] Episode {ep_num}: {str(e)}"
                     
                     time.sleep(2)
                     continue # successful_episodes 증가 안 하고 다시 루프
@@ -187,7 +201,7 @@ class VerbalReinforceOptimizer(Teleprompter):
                 self.save_logs()
             return student  # 실패 시 원본 학생 모델 반환
 
-    def _evaluate(self, student, trainset, episode, instruction, ep_start_time):
+    def _evaluate(self, student, trainset, episode, instruction, ep_start_time, agent=None):
         """
         평가 수행 및 로그 기록 (self.history에 저장)
         """
@@ -197,6 +211,10 @@ class VerbalReinforceOptimizer(Teleprompter):
         # [NEW] 메타데이터 준비 (설정 파일에서 가져오기)
         opt_model = Settings.OPTIMIZER_MODEL
         test_model = Settings.TESTER_MODEL
+        
+        # OptimizerLLM 정보 추출
+        optimizer_system_prompt = agent.last_system_prompt if agent else None
+        optimizer_total_input = agent.last_total_input if agent else None
         
         # 데이터셋 순회하며 평가
         for example in trainset:
@@ -258,7 +276,11 @@ class VerbalReinforceOptimizer(Teleprompter):
                 "Optimizer_Model_Name": opt_model,
                 "Optimizer_Model_Provider": "azure",
                 "Tester_Model_Name": test_model,
-                "Tester_Model_Provider": "azure"
+                "Tester_Model_Provider": "azure",
+                
+                # OptimizerLLM 관련 정보
+                "Optimizer_System_Prompt": optimizer_system_prompt,
+                "Optimizer_Total_Input": optimizer_total_input
             }
             
             # 리스트에 추가 (이게 없어서 저장이 안 되었던 겁니다!)
@@ -266,15 +288,18 @@ class VerbalReinforceOptimizer(Teleprompter):
 
         avg_score = sum(scores) / len(scores) if scores else 0.0
         
-        # 다음 턴을 위한 State 구성 (기존 env.step의 반환값 next_state 구성 로직)
-        # 여기서는 간단한 예시로 구성했습니다. 실제 로직에 맞춰 확장하세요.
+        # 다음 턴을 위한 State 구성 (MDP-v3 스타일 구조화된 피드백)
+        structured_feedback = self._aggregate_feedback(feedback_logs, episode, instruction, avg_score)
+        fail_cases_only = self._extract_fail_cases_from_feedback(feedback_logs, instruction, avg_score) # 실패 케이스만 추출 (프롬프트와 평균 점수 포함)
+        
         next_state = {
             "current_instruction": instruction,
-            "current_similarity_score": avg_score,
+            "current_similarity_score": avg_score, # 해당 에피소드에서의 평균 유사도 점수
             "total_score": avg_score,  # total_score도 추가
-            # feedback_logs에서 실패 사례 등을 추출하여 verbal_feedback 구성
-            "verbal_feedback": self._aggregate_feedback(feedback_logs), 
-            "fail_case_feedback": self._get_fail_cases(feedback_logs)
+            # 구조화된 피드백 (History + Feedback + Action 통합)
+            "verbal_feedback": structured_feedback,
+            # 기존 agent/optimizer_agent.py가 사용하는 fail_case_feedback (실패 케이스만)
+            "fail_case_feedback": fail_cases_only
         }
         
         return avg_score, next_state
@@ -308,29 +333,148 @@ class VerbalReinforceOptimizer(Teleprompter):
             # 지시문 교체
             predictor.extended_signature.instructions = new_instruction
 
-    def _aggregate_feedback(self, logs):
+    def _aggregate_feedback(self, logs, episode, instruction, avg_score):
         """
-        [Original Logic from dspy_rag_env.py]
-        여러 예제의 'Analysis(분석)' 멘트를 모아서 중복을 제거하고
-        전체적인 언어적 피드백(Verbal Feedback)을 생성합니다.
+        MDP-v3 스타일의 구조화된 피드백 생성
+        [History] + [Feedback] + [Action] 섹션으로 체계적으로 구성
         """
-        analyses = []
-        for log in logs:
-            # 로그에서 'Analysis' 항목 추출
-            analysis_text = log.get("Analysis", "")
-            
-            # 내용이 있고, 중복되지 않으면 리스트에 추가
-            if analysis_text and analysis_text not in analyses:
-                analyses.append(analysis_text)
         
-        # 너무 길어지지 않게 앞에서부터 3개만 합쳐서 반환
-        return " ".join(analyses[:3]) if analyses else "No specific verbal feedback."
+        # 1. 현재 에피소드 평가 정보 수집
+        evaluation_summary = []
+        failed_cases = []
+        
+        for log in logs:
+            score_card = log.get("ScoreCard", {})
+            analysis = log.get("Analysis", "")
+            answer_sheet = log.get("AnswerSheet", {})
+            
+            # 평가 요약 수집
+            if analysis:
+                evaluation_summary.append(analysis)
+            
+            # 실패 사례 수집 (점수 낮은 것들)
+            score = score_card.get("final_total_score", 0.0)
+            if score < 1.0:
+                question = answer_sheet.get("current_question", "")
+                gold_answer = answer_sheet.get("reference_answer", "")
+                critical_review = score_card.get("critical_review", "")
+                
+                failed_cases.append({
+                    "question": question[:200],
+                    "gold_answer": gold_answer[:200], 
+                    "issue": critical_review[:300],
+                    "score": score
+                })
+        
+        # 2. 구조화된 피드백 생성
+        structured_feedback = f"""
+[System] RAG 시스템 프롬프트 최적화 - Episode {episode} 평가 결과
+
+[Current Performance]
+- 현재 Episode: {episode}
+- CleanLLM이 사용한 시스템 프롬프트:
+"{instruction}" 
+- 현재 Episode 평균 성능 점수: {avg_score:.4f}
+
+[Detailed Evaluation]
+"""
+        
+        # 평가 상세 요약 추가 (최대 2개)
+        if evaluation_summary:
+            for i, summary in enumerate(evaluation_summary[:2], 1):
+                structured_feedback += f"• 평가 {i}: {summary[:400]}\n"
+        
+        structured_feedback += "\n[Failed Cases Analysis]"
+        
+        # 실패 사례 분석 (최악 1-2개)
+        if failed_cases:
+            # 점수가 가장 낮은 사례들 선택
+            worst_cases = sorted(failed_cases, key=lambda x: x['score'])[:2]
+            
+            for i, case in enumerate(worst_cases, 1):
+                structured_feedback += f"""
+실패 사례 {i}:
+- 질문: {case['question']}
+- 모범답안: {case['gold_answer']}
+- 문제점: {case['issue']}
+- 점수: {case['score']:.3f}
+"""
+        else:
+            structured_feedback += "\n• 모든 테스트 케이스 통과 (성공)"
+            
+        structured_feedback += f"""
+
+[Improvement Direction]
+위 평가 결과를 바탕으로 다음 에피소드에서는:
+1. 실패한 사례들의 공통 문제점을 해결하도록 프롬프트를 개선하세요
+2. 평균 점수 {avg_score:.4f}에서 더 높은 성능을 목표로 하세요
+3. 성공한 요소들은 유지하면서 문제 영역을 보완하세요
+"""
+        
+        return structured_feedback.strip()
+    
+    def _extract_fail_cases_from_feedback(self, logs, instruction, avg_score):
+        """
+        [사용자 의도 반영] 오답노트용 실패 케이스 추출:
+        1 에피소드에서 테스트한 모든 샘플 중 가장 낮은 점수를 받은 1개 케이스만 반환
+        해당 케이스의 프롬프트, 질문, CleanLLM 답변, 점수를 오답노트로 활용
+        
+        Args:
+            logs: 평가 결과 로그들
+            instruction: 현재 에피소드에서 사용된 프롬프트 
+            avg_score: 해당 에피소드의 평균 점수
+        """
+        if not logs:
+            return "[Initial State] No evaluation data available."
+            
+        # 가장 낮은 점수의 케이스 찾기
+        worst_case = None
+        lowest_score = float('inf')
+        
+        for log in logs:
+            score_card = log.get("ScoreCard", {})
+            score = score_card.get("final_total_score", 0.0)
+            
+            # 가장 낮은 점수 업데이트
+            if score < lowest_score:
+                lowest_score = score
+                worst_case = log
+        
+        # 실패 케이스가 없으면 (모든 케이스가 완벽한 경우)
+        if worst_case is None:
+            return "[Perfect Performance] All cases achieved perfect scores."
+            
+        # 가장 낮은 점수 케이스의 정보 추출
+        answer_sheet = worst_case.get("AnswerSheet", {})
+        score_card = worst_case.get("ScoreCard", {})
+        
+        question = answer_sheet.get("current_question", "")[:200]
+        gold_answer = answer_sheet.get("reference_answer", "")[:200]
+        model_answer = answer_sheet.get("model_answer", "")[:200]  # CleanLLM 답변
+        critical_review = score_card.get("critical_review", "")[:300]
+        
+        # 오답노트 형태로 포맷팅 (프롬프트, 평균 점수, 가장 성능이 떨어진 1개 케이스)
+        fail_case_note = (
+            f"=== EPISODE PERFORMANCE ANALYSIS ===\n"
+            f"Average Score: {avg_score:.3f}\n"
+            f"Used Prompt: {instruction[:300]}{'...' if len(instruction) > 300 else ''}\n\n"
+            f"=== WORST CASE (Score: {lowest_score:.3f}) ===\n"
+            f"Question: {question}\n\n"
+            f"Gold Answer: {gold_answer}\n\n"
+            f"Model Answer: {model_answer}\n\n"
+            f"Issue Analysis: {critical_review}\n"
+            f"================================"
+        )
+        
+        return fail_case_note
 
     def _get_fail_cases(self, logs):
         """
         [Original Logic from dspy_rag_env.py]
         점수가 1.0(만점) 미만인 케이스들을 모아서
         Agent가 참고할 수 있는 '오답 노트(Fail Case Feedback)'를 생성합니다.
+        --> 변경
+        TODO 한 Episode 내에서 시도했던 dataset 중, 가장 점수가 낮은 경우의 오답 노트를 생성합니다. 
         """
         failed_examples = []
         
@@ -427,6 +571,9 @@ class VerbalReinforceOptimizer(Teleprompter):
                     ragas_context_recall_score=row.get('Ragas_Context_Recall_Score'),
                     # ragas_is_faithful=row.get('Ragas_Is_Faithful'),
                     # ragas_is_relevant=row.get('Ragas_Is_Relevant'),
+                    # OptimizerLLM 관련 정보
+                    optimizer_system_prompt=row.get('Optimizer_System_Prompt'),
+                    optimizer_total_input=row.get('Optimizer_Total_Input'),
                     is_success=row['Is_Success'],
                     error_log=row['Error_Log'],
                     created_at=row['Episode_Start_Time'] if pd.notnull(row['Episode_Start_Time']) else datetime.now()  # 실제 에피소드 시작 시간 사용
